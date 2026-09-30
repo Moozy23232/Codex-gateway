@@ -8,119 +8,98 @@
 
 API key 供应商使用 Bearer 认证，只接收白名单内的协议请求头；客户端 Cookie、账号标识和任意自定义认证头不会原样转发。Responses URL 的查询参数也不受支持，包括在 base URL 中附加参数。依赖专用请求头或 `?api-version=...` 等查询参数的入口，需要先提供兼容的前置适配服务。
 
-## 构建与使用
+## 安装
 
-当前分支尚未发布预编译 Release。开发者构建一次后，可以把对应系统和架构的二进制分发给使用者。
-
-开发环境使用 `mise` 管理 Go 版本，项目 `mise.toml` 固定 Go 1.27.1；依赖由 Go Modules 管理，版本和校验值保存在 `go.mod` / `go.sum`。安装 mise 后，在仓库目录运行：
+当前还没有发布 Release，下面的远端安装入口将在首次正式发布后可用。安装脚本自动识别 Linux/macOS 和 amd64/arm64，下载对应二进制并校验 SHA256；使用者不需要 Go、Python 或 mise。
 
 ```bash
-mise trust
-mise install
-mise exec -- bash scripts/build.sh
+curl -fsSL https://github.com/Moozy23232/Codex-gateway/releases/latest/download/install.sh | sh
 ```
 
-如果 Go 已在当前终端的 PATH 中，直接运行 `bash scripts/build.sh` 即可。默认输出 `dist/<系统>_<架构>/codex-gateway`，例如 Linux x86_64 为 `dist/linux_amd64/codex-gateway`。项目仅有 TOML 解析库这一项运行依赖，它会编译进程序；构建使用 `CGO_ENABLED=0`。
-
-把二进制放入 PATH 中的目录后：
+默认安装为 `~/.local/bin/codex-gateway`。安装目录可以自定义，命令行参数优先于环境变量；包含空格的路径需要加引号：
 
 ```bash
-codex-gateway --version
-codex-gateway --help
+curl -fsSL https://github.com/Moozy23232/Codex-gateway/releases/latest/download/install.sh | \
+  sh -s -- --install-dir "$HOME/apps/codex/bin"
+
+curl -fsSL https://github.com/Moozy23232/Codex-gateway/releases/latest/download/install.sh | \
+  CODEX_GATEWAY_INSTALL_DIR="$HOME/apps/codex/bin" sh
 ```
 
-源码开发可以一条命令构建并运行：
+也可以用 `--version 0.2.0` 或 `CODEX_GATEWAY_VERSION=0.2.0` 选择版本（此处版本仅作示例）。默认最新版会先解析为一个固定 tag，二进制和校验文件都从该 tag 下载。指定的版本必须已有完整 Release。
+
+安装脚本只替换所选目录下的 `codex-gateway`，按当前用户的权限安装，不自动使用 `sudo`，也不修改 shell 配置或供应商配置。请选择自己有写权限的目录。下载或校验失败时保留已有程序。如果安装目录尚未在 `PATH` 中，脚本会给出提示；也可以用该程序的绝对路径运行。重新执行安装命令即可升级。
+
+源码中的安装脚本可以直接查看选项，此命令不发网络请求：
 
 ```bash
-bash scripts/run.sh --help
-bash scripts/run.sh --home /absolute/path/to/private-gateway run
+sh scripts/install.sh --help
 ```
 
-`run.sh` 会先构建持久二进制，再运行它。无参数执行时默认启动 `run`；以下命令中的 `codex-gateway` 均可替换为 `bash scripts/run.sh`。
+## 快速开始
 
-交叉构建使用同一入口：
+安装后，第三方供应商只需要三步：
 
 ```bash
-GOOS=linux GOARCH=arm64 bash scripts/build.sh
-GOOS=darwin GOARCH=arm64 bash scripts/build.sh
+codex-gateway add-provider example
+codex-gateway add-model
+codex-gateway
 ```
 
-## 快速开始：仅使用 API 供应商
+`add-provider` 会询问 Responses API 的 base URL 和 API key；终端中的 key 输入不回显，保存为配置目录下权限 `0600` 的私有文件。省略供应商名时也会询问。首次添加自动初始化，不必先执行 `init`。
 
-这套流程使用 `token` 模式，无需 ChatGPT 登录。先准备供应商 API key，并通过当前终端的环境变量 `EXAMPLE_API_KEY` 提供；网关配置只保存变量名。还需要一份与你的 Codex 版本匹配的模型目录，作为客户端元数据模板。
+`add-model` 在只有一个供应商时直接使用它，否则让你选择。随后尝试列出模型，也可以直接输入模型 ID；供应商没有模型列表接口时仍可手工添加。模型目录自动生成，第一个模型自动设为默认。最后直接运行 `codex-gateway`，即可启动网关并进入 Codex，在 `/model` 中选择已添加的模型。
+
+已知模型 ID 时可以省略列表请求，指定别名也可选：
 
 ```bash
-codex-gateway init --auth-mode token
-codex-gateway catalog list
+codex-gateway add-model replace-with-provider-model-id --provider example
+codex-gateway add-model replace-with-provider-model-id \
+  --provider example --alias example/coding --default
 ```
 
-`init` 默认从 Codex home 的 `models_cache.json` 读取模板；没有缓存时，尝试读取其 `config.toml` 中 `model_catalog_json` 指向的文件。Codex home 按 `--codex-home`、`CODEX_HOME`、`~/.codex` 的顺序选择。
-
-如果 `catalog list` 输出为空，先导入已有的 Codex 模型目录，再继续：
+需要脚本化配置时，通过环境变量或现有私有文件提供 key 的引用：
 
 ```bash
-codex-gateway catalog import /absolute/path/to/models_cache.json
-codex-gateway catalog list
-```
-
-也可以在初始化时用 `init --auth-mode token --catalog /absolute/path/to/models_cache.json` 指定目录。仓库不打包个人模型缓存；目录必须包含 `models` 数组，每个模型有 `slug`，以及当前 Codex 所需的能力字段。
-
-把下列占位值换成供应商的真实 API 地址、模型 ID，以及 `catalog list` 中能力相符的 `slug`：
-
-```bash
-codex-gateway provider add example \
+# EXAMPLE_API_KEY 应事先从你的私有环境加载。
+codex-gateway add-provider example \
   --base-url https://api.example.com/v1 \
   --api-key-env EXAMPLE_API_KEY
-
-codex-gateway model add example/coding \
-  --provider example \
-  --upstream-model replace-with-provider-model-id \
-  --template replace-with-catalog-slug \
-  --display-name 'Example Coding' \
-  --default
-
-codex-gateway validate --credentials
-codex-gateway run
+codex-gateway add-model replace-with-provider-model-id --provider example
 ```
 
-`https://api.example.com/v1` 是示例域名，不是可用的供应商服务。网关会向该 base URL 下的 `/responses` 转发请求。
+`https://api.example.com/v1` 和模型 ID 都是占位值；网关向 base URL 下的 `/responses` 转发请求。重复添加其他供应商和模型即可。同名条目需要明确使用 `--replace`，并提供完整的新参数。
 
-模型别名 `example/coding` 是 Codex 菜单和对话中使用的名字；`--upstream-model` 是发送给供应商的真实模型 ID。`--template` 复制已有模型的客户端元数据，包括上下文窗口、推理档位和工具能力；它**不会扩大上游模型的实际上下文或能力**。选错模板可能导致上游拒绝请求，必须按供应商真实能力选择。
+### 官方订阅
 
-添加第二个供应商时重复 `provider add` 和 `model add`，使用不同供应商名及模型别名即可。多个别名也可以映射到同一个供应商。
-
-## 使用 Codex 原生账号与官方入口
-
-`init` 不带 `--auth-mode` 时默认使用 `codex` 模式，保留 Codex 原生登录和 OAuth 生命周期。它使用内置 `openai` provider 的历史归属，让官方入口和第三方别名可以出现在同一套 Codex 历史中。网关不会自行刷新或复制账号凭据。
-
-`token` 模式使用独立的 `codex-gateway` provider，由 launcher 把本地 `client-token` 传给 Codex，不需要 ChatGPT 账号。它与 `openai` provider 的历史归属不同；需要延续原有官方对话时，应使用 `codex` 模式。切换供应商是否能继续处理已有会话，仍取决于各上游对历史内容的兼容性。
-
-下面用独立配置目录建立原生账号模式，避免覆盖前面的 API-only 配置。先确保所选 Codex home 已完成原生登录：
+添加官方入口时使用 `--official`，无需填写 URL 或 API key：
 
 ```bash
-codex-gateway --home ~/.config/codex-gateway-native init --port 33990
-codex-gateway --home ~/.config/codex-gateway-native provider add official \
-  --base-url https://chatgpt.com/backend-api/codex \
-  --auth codex
-codex-gateway --home ~/.config/codex-gateway-native catalog list
-codex-gateway --home ~/.config/codex-gateway-native model add official/coding \
-  --provider official \
-  --upstream-model replace-with-official-model-id \
-  --template replace-with-catalog-slug \
-  --default
-codex-gateway --home ~/.config/codex-gateway-native run
+codex-gateway add-provider --official
+codex-gateway add-model --provider official
+codex-gateway
 ```
 
-这个目录也能通过 `provider add ... --api-key-env ...` 添加第三方供应商。`--auth codex` 的供应商只能用于 `codex` 模式。
+默认供应商名为 `official`，也可在命令中指定其他名字。网关复用所选 Codex home 中的 ChatGPT 文件登录；没有时调用原生 `codex login`，完成订阅账号登录。Codex home 使用 `CODEX_HOME`，未设置时为 `~/.codex`；提前使用 `init --codex-home ...` 可以选择其他目录。
 
-如果官方账号初始化需要代理，可在 `init` 时提供 `--bootstrap-proxy http://127.0.0.1:7890`，或初始化后设置：
+新配置使用本地 `token` 认证，官方与第三方模型可以混合添加。只有请求官方模型时才读取 ChatGPT 凭据并让原生 Codex 处理刷新，第三方模型无需 ChatGPT 登录。网关不自行实现 OAuth 刷新，也不把 ChatGPT token 写进网关配置。官方 token 仅发往固定官方端点。
+
+此桥接需要原生 `auth.json` 文件凭据。如果原来只存于系统 keyring，`--official` 会调用原生登录，以仅影响该次命令的文件存储选项重新登录；不会改写全局 `config.toml`。要求地区专属后端的工作空间暂不支持此桥接，需要使用原生 Codex。开发测试不使用个人账号登录或真实模型请求。
+
+原有 `init` / `provider add` / `model add` / `catalog` 命令仍可使用。高级 `init` 的默认值继续是 `--auth-mode codex`，已有配置不会自动迁移。`codex` 模式沿用内置 `openai` provider 的历史归属；新 `token` 模式使用 `codex-gateway` provider，历史归属不同。若需要延续原有官方对话，可继续使用已有的 `codex` 模式配置。
+
+### 模型能力与代理
+
+自动目录优先复用模型 ID 完全匹配的已有元数据；没有匹配时，生成通用文本配置，不提供可选推理档位或图片输入。Codex 0.159.2 在此配置下仍会发送 `reasoning.effort=none`，上游需要接受该值。通用配置使用 32,000 token 的客户端预算，并在 28,000 token 左右触发自动压缩；这只是保守的默认预算，不代表供应商实际支持的上下文长度。应按模型真实能力覆盖：
 
 ```bash
-codex-gateway --home ~/.config/codex-gateway-native config set \
-  bootstrap_proxy http://127.0.0.1:7890
+codex-gateway add-model replace-with-provider-model-id --provider example \
+  --context-window 64000 --reasoning-effort medium
 ```
 
-`bootstrap_proxy` 为 Codex 子进程补齐缺失的代理环境变量，不覆盖已设置的代理。它与供应商代理分别配置：官方模型请求也需要代理时，给该供应商添加 `--proxy http://127.0.0.1:7890`；第三方供应商仍按自己的代理设置连接。
+也可以使用 `--template <slug>` 明确选择兼容模板，或通过 `catalog import <file>` 导入元数据。能力参数只影响客户端行为，不会增加上游能力；模型仍须支持 Codex 的 Responses、工具调用和流式协议。改变已添加模型的设置时加 `--replace`。
+
+原生登录与账号刷新需要代理时，可使用终端代理环境变量；也可先 `init --auth-mode token --bootstrap-proxy http://127.0.0.1:7890`，或对现有配置执行 `config set bootstrap_proxy http://127.0.0.1:7890`。此设置补齐原生子进程缺失的代理环境变量，不覆盖已设置的值。模型请求使用供应商自己的 `--proxy`，例如 `add-provider --official --proxy http://127.0.0.1:7890`；第三方默认直连。
 
 ## 配置与密钥
 
@@ -130,23 +109,24 @@ codex-gateway --home ~/.config/codex-gateway-native config set \
 2. 环境变量 `CODEX_GATEWAY_HOME`
 3. `$XDG_CONFIG_HOME/codex-gateway`，未设置时为 `~/.config/codex-gateway`
 
-`init` 拒绝覆盖非空目录，初始 provider 和 model 列表均为空。它创建网关私有配置，不修改 Codex 本体或全局 `config.toml`。每个配置目录应使用不同端口；例如初始化第二个同时运行的网关时加 `--port 33990`。
+首次 `add-provider` 自动初始化空目录；显式 `init` 拒绝覆盖非空目录，初始 provider 和 model 列表均为空。配置只保存在网关私有目录，不修改 Codex 本体或全局 `config.toml`。每个配置目录应使用不同端口；例如初始化第二个同时运行的网关时先执行 `init --auth-mode token --port 33990`。
 
 | 文件 | 用途 |
 | --- | --- |
 | `config.json` | 供应商、模型路由及进程配置，密钥使用引用 |
-| `templates.json` | 导入的 Codex 模型元数据模板 |
+| `templates.json` | 自动生成或导入的 Codex 模型元数据模板 |
 | `models.json` | 按别名生成、传给 Codex 的模型目录 |
+| `keys/` | 交互输入的供应商 API key，文件权限 `0600` |
 | `client-token` | token 模式下 Codex 到本地网关的认证 |
 | `admin-token` | 本地网关状态查询和停止操作的认证 |
 | `runtime/` | 运行状态、生命周期锁和 `server.log` |
 
 实际供应商配置应放在仓库外的私人目录；不要把真实供应商地址、模型映射、令牌或密钥加入 Git。[examples/config.json](examples/config.json) 只展示配置结构；其中路径、模型 ID 和模板名均是占位值，不应直接覆盖已经初始化的配置。
 
-API key 支持环境变量或私有文件，二者选择其一：
+除了交互输入，API key 也支持环境变量或现有私有文件，二者选择其一：
 
 ```bash
-codex-gateway provider add example-file \
+codex-gateway add-provider example-file \
   --base-url https://api.example.com/v1 \
   --api-key-file /absolute/path/to/private-api-key
 ```
@@ -178,7 +158,11 @@ codex-gateway run -- resume
 codex-gateway stop
 ```
 
-`start` 启动或复用这个配置目录对应的后台网关；`run` 先确保网关运行，再调用 `PATH` 中的 `codex`。已有的 Codex launcher 和备份入口仍通过这条调用链运行，也可以用 `run --codex-bin /absolute/path/to/codex` 明确选择可执行文件。Codex 参数放在 `run --` 后，例如 `run -- resume <session-id>`。
+无参数的 `codex-gateway` 等同于 `codex-gateway run`。`start` 启动或复用这个配置目录对应的后台网关；`run` 先确保网关运行，再调用 `PATH` 中的 `codex`。已有的 Codex launcher 和备份入口仍通过这条调用链运行，也可以用 `run --codex-bin /absolute/path/to/codex` 选择本次客户端的可执行文件。Codex 参数放在 `run --` 后，例如 `run -- resume <session-id>`。
+
+首次调用原生客户端时，如果所选 Codex home 尚不存在，会创建该目录；已有目录的权限、配置和登录文件保持原样。官方登录或凭据刷新产生的认证更新由原生 Codex 负责。
+
+如果需要同时为客户端、官方登录、账号刷新和模型发现选择原生可执行文件，启动网关前设置 `CODEX_GATEWAY_CODEX_BIN=/absolute/path/to/codex`。该环境变量优先于 `PATH`，单次 `run --codex-bin` 则优先于它。已运行的网关不会自动继承新环境变量，需要先停止空闲网关再启动。
 
 `run` 会把用户的 `-c` / `--config` 参数与网关配置放到同一层，用户参数优先；字面 `--` 后的提示内容保持原样。这兼容 Codex 0.159.2 中子命令后置 `-c` 替换前置配置列表的行为，因此 `run -- exec -c model_reasoning_effort=low ...` 也能保留网关设置。
 
@@ -218,6 +202,72 @@ codex-gateway config set retry_invalid_encrypted_reasoning true
 
 开启后仅在 HTTP 400 错误明确点名某个加密 reasoning 项时，移除该项并做有限次数的重试；不会修改已保存的原会话，也不会删除 compaction 项。它不保证所有上游之间的历史兼容，更不修复任意认证、网络或模型错误。无法兼容时，应为对应供应商开启新会话。
 
+## 构建与使用
+
+开发者可以先在本机构建，或把对应系统和架构的二进制分发给使用者。
+
+开发环境使用 `mise` 管理 Go 版本，项目 `mise.toml` 固定 Go 1.27.1；依赖由 Go Modules 管理，版本和校验值保存在 `go.mod` / `go.sum`。安装 mise 后，在仓库目录运行：
+
+```bash
+mise trust
+mise install
+mise exec -- bash scripts/build.sh
+```
+
+如果 Go 已在当前终端的 PATH 中，直接运行 `bash scripts/build.sh` 即可。默认输出 `dist/<系统>_<架构>/codex-gateway`，例如 Linux x86_64 为 `dist/linux_amd64/codex-gateway`。TOML 解析和终端输入依赖都编译进程序；构建使用 `CGO_ENABLED=0`。
+
+把二进制放入 PATH 中的目录后：
+
+```bash
+codex-gateway --version
+codex-gateway --help
+```
+
+源码开发可以一条命令构建并运行：
+
+```bash
+bash scripts/run.sh --help
+bash scripts/run.sh --home /absolute/path/to/private-gateway run
+```
+
+`run.sh` 会先构建持久二进制，再运行它。无参数执行时默认启动 `run`；以下命令中的 `codex-gateway` 均可替换为 `bash scripts/run.sh`。
+
+交叉构建使用同一入口：
+
+```bash
+GOOS=linux GOARCH=arm64 bash scripts/build.sh
+GOOS=darwin GOARCH=arm64 bash scripts/build.sh
+```
+
+## 打包与 Release
+
+仅打包到本地，不创建 tag、不上传文件：
+
+```bash
+VERSION=0.2.0 bash scripts/package.sh
+```
+
+打包入口面向 Linux，需要 GNU tar 和 GNU coreutils；macOS 用户可以使用源码构建入口或预编译程序。默认生成 `dist/releases/v0.2.0/`，包括四个平台的 `codex-gateway_<系统>_<架构>.tar.gz`、`install.sh` 和 `SHA256SUMS`。压缩包只包含根目录的可执行文件，二进制 `--version` 使用传入的发布版本。输出目录已存在时会拒绝覆盖；`OUTPUT_DIR` 可指定新目录，`TARGETS` 可选平台子集：
+
+```bash
+VERSION=0.2.0 TARGETS='linux/amd64' OUTPUT_DIR=/absolute/path/to/new-package \
+  bash scripts/package.sh
+```
+
+`.github/workflows/release.yml` 提供两种入口：
+
+- **手动运行 workflow**：输入版本号，只测试、构建并保存 Actions artifact，供检查，不发布 Release。
+- **推送 `v*` tag**：检查 tag 对应提交已在 `main` 上，测试通过后构建四个平台，上传 Release 草稿的附件，再公开该 Release。预发布版本会标记为 prerelease。
+
+工作流会再次核对安装包校验值，并使用仓库提供的 `GITHUB_TOKEN` 发布，不需要供应商 key 或个人开发机配置。已有同名 Release 不会被覆盖。
+
+准备正式发布时，在代码合并、确认版本之后才执行下面的示例；这会触发公开发布：
+
+```bash
+git tag -a v0.2.0 -m "Release v0.2.0"
+git push origin v0.2.0
+```
+
 ## 开发检查
 
 代码和文档开发在独立 Git worktree 中进行。统一验证入口：
@@ -228,8 +278,12 @@ mise exec -- bash scripts/check.sh
 
 脚本运行 `go mod verify`、`go vet ./...`、`go test -race ./...`，然后构建并运行真实二进制。每次建立唯一的 `runs/_tests/check_<UTC时间>_<随机后缀>/`，保存工具链版本、依赖快照、测试日志、构建产物和退出码。
 
-测试使用本地模拟上游、假的 Codex 启动器与独立配置目录，检查路由、流式转发、凭据隔离、后台生命周期以及参数合并。Go 分支的验证结果只覆盖实际执行过的检查，不沿用此前 Python 实现的真实供应商验证结论。真实上游的可用性、跨供应商会话兼容和模型质量需要另行验证。
+测试使用本地模拟上游、假的 Codex 启动器与独立配置目录，检查路由、流式转发、凭据隔离、后台生命周期以及参数合并。交互配置测试覆盖自动初始化、取消不写入、密钥权限、模型选择、默认模型和终端输入恢复；官方认证使用模拟账号测试刷新及重试，不调用个人账号。
 
-2026-09-30 使用 Go 1.27.1 在 Linux amd64 完成依赖校验、`go vet`、全量 `-race` 测试和独立二进制检查。测试子进程的 `PATH` 不含 Go/Python，仍能启动网关、转发模拟 SSE 请求并保留假 Codex 的退出码。Linux amd64/arm64、macOS amd64/arm64 四个目标均编译成功；其他架构产物只做了交叉编译，实际运行验证限于 Linux amd64。
+可通过 `CODEX_GATEWAY_TEST_CODEX_BIN=/absolute/path/to/native/codex` 额外启用原生客户端检查。请指向原生可执行文件；测试从不存在的 Codex home 开始，自动添加本地模拟供应商及模型，验证原生客户端收到流式回复，并检查模型路由、推理字段和文本能力。这些测试不读取个人登录。Go 分支不沿用此前 Python 实现的真实供应商验证结论；真实上游的可用性、跨供应商会话兼容和模型质量需要另行验证。
+
+安装与打包测试还覆盖自定义目录、参数优先级、指定版本、下载或校验失败时保留旧程序、重复打包的字节一致性，以及真实二进制经本地 Release 服务安装的完整链路。网关、安装器和打包模块的全量 `-race` 检查已通过；Release 工作流通过 actionlint 静态检查和版本条件检查，尚未在 GitHub 执行发布。
+
+2026-09-30 使用 Go 1.27.1 在 Linux amd64 完成依赖校验、`go vet`、全量 `-race` 测试和独立二进制检查。测试子进程的 `PATH` 不含 Go/Python，仍能启动网关、转发模拟 SSE 请求并保留假 Codex 的退出码。另用原生 Codex 0.159.2 从不存在的配置目录开始，验证自动配置后的首次启动及本地模拟 SSE 回复；通用模型实际发送 `reasoning.effort=none`。Linux amd64/arm64、macOS amd64/arm64 四个目标均编译成功；其他架构产物只做了交叉编译，实际运行验证限于 Linux amd64。
 
 供应商地址、模型映射、API key 和真实请求日志都属于私人配置，应保存在仓库外。仓库只包含通用示例和本地模拟测试。

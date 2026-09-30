@@ -48,6 +48,7 @@ type gatewayServer struct {
 	fingerprint        string
 	adminToken         string
 	clientToken        string
+	official           *officialAuth
 	authPath           string
 	clients            map[string]*http.Client
 	authMu             sync.Mutex
@@ -143,6 +144,9 @@ func newGatewayServer(home string) (*gatewayServer, error) {
 		clients:    make(map[string]*http.Client),
 		authHashes: make(map[[sha256.Size]byte]time.Time),
 		now:        time.Now, requestReadTimeout: requestTimeout, stop: make(chan struct{}),
+	}
+	if cfg.ClientAuth == "token" {
+		g.official = newOfficialAuth(home, cfg)
 	}
 	for name, provider := range cfg.Providers {
 		client, err := newUpstreamClient(provider.Proxy)
@@ -574,13 +578,25 @@ func (g *gatewayServer) forward(w http.ResponseWriter, r *http.Request, path str
 	}
 	provider := g.config.Providers[route.Provider]
 	body["model"] = route.Model
-	headers := upstreamHeaders(r.Header, provider.Auth == "codex")
+	headers := upstreamHeaders(r.Header, provider.Auth == "codex" && g.config.ClientAuth == "codex")
+	var officialToken string
 	if provider.Auth == "codex" {
-		if g.config.ClientAuth != "codex" {
-			gatewayError(w, 500, "Codex upstream authentication requires Codex client authentication")
-			return
+		if g.config.ClientAuth == "codex" {
+			headers.Set("Authorization", r.Header.Get("Authorization"))
+		} else {
+			if strings.TrimRight(provider.BaseURL, "/") != officialBaseURL || g.official == nil {
+				gatewayError(w, 500, "Native ChatGPT credentials require the official endpoint")
+				return
+			}
+			credential, err := g.official.credential(r.Context(), false, "")
+			if err != nil {
+				gatewayError(w, 503, err.Error())
+				return
+			}
+			credential.apply(headers)
+			officialToken = credential.token
+			headers.Set("Originator", "codex_cli_rs")
 		}
-		headers.Set("Authorization", r.Header.Get("Authorization"))
 	} else {
 		key, err := ResolveAPIKey(provider)
 		if err != nil || key == "" || strings.ContainsAny(key, "\r\n") {
@@ -596,6 +612,7 @@ func (g *gatewayServer) forward(w http.ResponseWriter, r *http.Request, path str
 	}
 	var response *http.Response
 	var buffered []byte
+	refreshedOfficial := false
 	for attempt := 0; attempt <= maxCompatRetries; attempt++ {
 		data, err := json.Marshal(body)
 		if err != nil {
@@ -612,6 +629,19 @@ func (g *gatewayServer) forward(w http.ResponseWriter, r *http.Request, path str
 		if err != nil {
 			gatewayError(w, 502, "Cannot complete the upstream request")
 			return
+		}
+		if response.StatusCode == http.StatusUnauthorized && officialToken != "" && !refreshedOfficial {
+			_ = response.Body.Close()
+			refreshedOfficial = true
+			credential, refreshErr := g.official.credential(r.Context(), true, officialToken)
+			if refreshErr != nil {
+				gatewayError(w, 503, refreshErr.Error())
+				return
+			}
+			credential.apply(headers)
+			officialToken = credential.token
+			attempt-- // Authentication retry is independent of compatibility retries.
+			continue
 		}
 		if response.StatusCode >= 300 && response.StatusCode < 400 {
 			_ = response.Body.Close()

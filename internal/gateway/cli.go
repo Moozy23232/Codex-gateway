@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -14,8 +15,13 @@ import (
 
 const help = `Codex Gateway — a local multi-provider Responses gateway
 
-Usage: codex-gateway [--home DIRECTORY] COMMAND
+Usage: codex-gateway [--home DIRECTORY] [COMMAND]
 
+  add-provider  [NAME] [--official] — add a provider, prompting for missing values
+  add-model     [MODEL_ID] [--provider NAME] — add a model and prepare its catalog
+  (no command)  Start the gateway and open Codex
+
+Advanced commands:
   init          Initialize private configuration (--auth-mode codex|token)
   provider      add NAME --base-url URL --api-key-env NAME | list | remove NAME
   model         add ALIAS --provider NAME --upstream-model ID --template SLUG | list | remove ALIAS
@@ -28,8 +34,8 @@ Usage: codex-gateway [--home DIRECTORY] COMMAND
   stop          Stop an idle gateway
   run           [--codex-bin PATH] [-- CODEX_ARGUMENTS...]
 
-Configuration is independent of Codex's global settings. API keys belong in
-environment variables or private files. Use COMMAND --help for options.
+Configuration is independent of Codex's global settings. Interactive API keys
+are saved in private files. Use COMMAND --help for options.
 `
 
 func newFlags(name string, out io.Writer) *flag.FlagSet {
@@ -88,6 +94,10 @@ func printJSON(out io.Writer, value any) error {
 }
 
 func Execute(args []string, out, errOut io.Writer) int {
+	return ExecuteWithInput(args, os.Stdin, out, errOut)
+}
+
+func ExecuteWithInput(args []string, in io.Reader, out, errOut io.Writer) int {
 	home := DefaultHome()
 	for len(args) > 0 {
 		if args[0] == "--help" || args[0] == "-h" {
@@ -113,15 +123,22 @@ func Execute(args []string, out, errOut io.Writer) int {
 		break
 	}
 	if len(args) == 0 {
-		fmt.Fprint(out, help)
-		return 2
+		args = []string{"run"}
 	}
 	resolved, err := ResolvePath(home)
 	if err != nil {
 		fmt.Fprintln(errOut, "error: cannot resolve gateway home")
 		return 2
 	}
-	code, err := dispatch(resolved, args, out, errOut)
+	var code int
+	switch args[0] {
+	case "add-provider":
+		err = addProvider(resolved, args[1:], in, out)
+	case "add-model":
+		err = addModel(resolved, args[1:], in, out)
+	default:
+		code, err = dispatch(resolved, args, out, errOut)
+	}
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
 	}

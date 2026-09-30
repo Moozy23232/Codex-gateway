@@ -29,6 +29,9 @@ const lifecycleTestClient = "test-client-token-12345678901234567890"
 // The production launcher re-execs its own binary. In tests that same binary
 // serves an isolated temporary home or behaves as a fake Codex executable.
 func TestMain(m *testing.M) {
+	if os.Getenv("CODEX_GATEWAY_OFFICIAL_HELPER") == "1" {
+		officialFakeCodex()
+	}
 	if os.Getenv("CODEX_GATEWAY_LIFECYCLE_HELPER") == "1" {
 		if len(os.Args) == 4 && os.Args[1] == "--home" && os.Args[3] == "serve" {
 			if os.Getenv("CODEX_GATEWAY_TEST_FAIL_START") == "1" {

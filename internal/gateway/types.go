@@ -1,6 +1,7 @@
 package gateway
 
-const Version = "0.2.0-dev"
+// Version is overridden by release builds through the linker's -X option.
+var Version = "0.2.0-dev"
 
 type ListenConfig struct {
 	Host string `json:"host"`

@@ -156,6 +156,8 @@ func WriteJSON(path string, value any) error {
 
 func hasSpace(value string) bool { return strings.IndexFunc(value, unicode.IsSpace) >= 0 }
 
+func hasControl(value string) bool { return strings.IndexFunc(value, unicode.IsControl) >= 0 }
+
 func validateURL(value, label string, allowHTTP, proxy bool) error {
 	u, err := url.Parse(value)
 	if err != nil || value == "" || hasSpace(value) || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
@@ -183,6 +185,8 @@ func validateURL(value, label string, allowHTTP, proxy bool) error {
 var providerName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 var modelAlias = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_./:-]{0,255}$`)
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+const officialBaseURL = "https://chatgpt.com/backend-api/codex"
 
 func ValidateConfig(cfg *Config) error {
 	if cfg == nil || cfg.Version != 1 {
@@ -219,8 +223,11 @@ func ValidateConfig(cfg *Config) error {
 		}
 		switch p.Auth {
 		case "codex":
-			if cfg.ClientAuth != "codex" || p.APIKeyEnv != "" || p.APIKeyFile != "" {
-				return errors.New("codex providers require codex client auth and no API key reference")
+			if p.APIKeyEnv != "" || p.APIKeyFile != "" {
+				return errors.New("codex providers cannot have an API key reference")
+			}
+			if cfg.ClientAuth == "token" && strings.TrimRight(p.BaseURL, "/") != officialBaseURL {
+				return errors.New("token mode can use native Codex credentials only with the official endpoint")
 			}
 		case "api_key":
 			if (p.APIKeyEnv == "") == (p.APIKeyFile == "") {
@@ -244,7 +251,7 @@ func ValidateConfig(cfg *Config) error {
 			return fmt.Errorf("model %s references an unknown provider", alias)
 		}
 		for _, v := range []string{m.Model, m.Template} {
-			if v == "" || len(v) > 512 || hasSpace(v) {
+			if v == "" || len(v) > 512 || hasSpace(v) || hasControl(v) {
 				return fmt.Errorf("model %s requires nonempty model and template identifiers", alias)
 			}
 		}
@@ -433,31 +440,11 @@ func Initialize(home string, options InitOptions) (*Config, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	if options.CodexHome == "" {
-		options.CodexHome = os.Getenv("CODEX_HOME")
-		if options.CodexHome == "" {
-			userHome, err := os.UserHomeDir()
-			if err != nil {
-				return nil, err
-			}
-			options.CodexHome = filepath.Join(userHome, ".codex")
-		}
-	}
-	options.CodexHome, err = ResolvePath(options.CodexHome)
+	cfg, err := initialConfig(options)
 	if err != nil {
 		return nil, err
 	}
-	if options.AuthMode == "" {
-		options.AuthMode = "codex"
-	}
-	if options.Port == 0 {
-		options.Port = 33989
-	}
-	cfg := &Config{Version: 1, Listen: ListenConfig{Host: "127.0.0.1", Port: options.Port}, CodexHome: options.CodexHome, ClientAuth: options.AuthMode, BootstrapProxy: options.BootstrapProxy, Providers: map[string]Provider{}, Models: map[string]Model{}}
-	if err := ValidateConfig(cfg); err != nil {
-		return nil, err
-	}
-	templates, err := discoverTemplates(options.CodexHome, options.CatalogFile)
+	templates, err := discoverTemplates(cfg.CodexHome, options.CatalogFile)
 	if err != nil {
 		return nil, err
 	}
@@ -480,6 +467,36 @@ func Initialize(home string, options InitOptions) (*Config, error) {
 		}
 	}
 	if err := SaveConfig(home, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Resolve defaults without creating files so setup can validate and collect all
+// input before initializing a new home.
+func initialConfig(options InitOptions) (*Config, error) {
+	if options.CodexHome == "" {
+		options.CodexHome = os.Getenv("CODEX_HOME")
+		if options.CodexHome == "" {
+			userHome, err := os.UserHomeDir()
+			if err != nil {
+				return nil, err
+			}
+			options.CodexHome = filepath.Join(userHome, ".codex")
+		}
+	}
+	codexHome, err := ResolvePath(options.CodexHome)
+	if err != nil {
+		return nil, err
+	}
+	if options.AuthMode == "" {
+		options.AuthMode = "codex"
+	}
+	if options.Port == 0 {
+		options.Port = 33989
+	}
+	cfg := &Config{Version: 1, Listen: ListenConfig{Host: "127.0.0.1", Port: options.Port}, CodexHome: codexHome, ClientAuth: options.AuthMode, BootstrapProxy: options.BootstrapProxy, Providers: map[string]Provider{}, Models: map[string]Model{}}
+	if err := ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil

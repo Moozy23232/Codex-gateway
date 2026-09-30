@@ -91,7 +91,7 @@ func TestConfigRejectsInvalidChangesBeforeSaving(t *testing.T) {
 			c.Providers["example"] = p
 		},
 		"two key refs": func(c *Config) { p := c.Providers["example"]; p.APIKeyFile = "/tmp/key"; c.Providers["example"] = p },
-		"codex provider token mode": func(c *Config) {
+		"native credentials at nonofficial endpoint in token mode": func(c *Config) {
 			p := c.Providers["example"]
 			p.Auth = "codex"
 			p.APIKeyEnv = ""
@@ -117,6 +117,27 @@ func TestConfigRejectsInvalidChangesBeforeSaving(t *testing.T) {
 				t.Fatal("failed save changed config")
 			}
 		})
+	}
+}
+
+func TestTokenModeAcceptsOnlyOfficialNativeCredentialEndpoint(t *testing.T) {
+	home, cfg := configFixture(t)
+	cfg.Providers["official"] = Provider{Auth: "codex", BaseURL: officialBaseURL}
+	if err := SaveConfig(home, cfg); err != nil {
+		t.Fatalf("mixed API key and official configuration: %v", err)
+	}
+	for _, endpoint := range []string{
+		"https://chatgpt.com.example.com/backend-api/codex",
+		"https://chatgpt.com/backend-api/other",
+		"http://chatgpt.com/backend-api/codex",
+		"https://chatgpt.com/backend-api/codex?redirect=1",
+	} {
+		p := cfg.Providers["official"]
+		p.BaseURL = endpoint
+		cfg.Providers["official"] = p
+		if err := ValidateConfig(cfg); err == nil {
+			t.Fatal("accepted a nonofficial native credential destination")
+		}
 	}
 }
 

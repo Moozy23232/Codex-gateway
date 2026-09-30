@@ -568,7 +568,7 @@ func lifecycleCodexArguments(home string, cfg *Config, userArgs []string) ([]str
 		}
 		sort.Strings(models)
 		if len(models) == 0 {
-			return nil, errors.New("no gateway models are configured; add a provider and model before launching Codex")
+			return nil, errors.New("no gateway models are configured; run codex-gateway add-provider, then codex-gateway add-model")
 		}
 		model = models[0]
 	}
@@ -601,6 +601,9 @@ func RunCodex(home string, args []string, codexExecutable string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	if _, err := os.Stat(filepath.Join(home, "config.json")); errors.Is(err, os.ErrNotExist) {
+		return 1, errors.New("gateway is not configured; run codex-gateway add-provider, then codex-gateway add-model")
+	}
 	cfg, err := LoadConfig(home)
 	if err != nil {
 		return 1, err
@@ -609,15 +612,15 @@ func RunCodex(home string, args []string, codexExecutable string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	if codexExecutable == "" {
-		codexExecutable = "codex"
-	}
-	executable, err := exec.LookPath(codexExecutable)
+	executable, err := codexExecutablePath(codexExecutable)
 	if err != nil {
-		return 1, errors.New("cannot find an executable Codex CLI; install Codex or specify its executable path")
+		return 1, err
 	}
 	env, err := lifecycleEnvironment(home, cfg, os.Environ())
 	if err != nil {
+		return 1, err
+	}
+	if err := ensureNativeHome(cfg); err != nil {
 		return 1, err
 	}
 	if _, err := Start(home); err != nil {
