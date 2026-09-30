@@ -2,31 +2,48 @@
 
 给 Codex CLI 使用的本地多供应商网关。把模型别名映射到不同供应商的 Responses API，在同一个 `/model` 菜单里选择模型；供应商地址、密钥引用、代理和模型目录由独立配置管理。
 
-运行时仅依赖 Python 标准库，需要 **Python 3.11+** 和已安装的 Codex CLI。进程管理使用 `fcntl`，面向 Linux/macOS；不支持原生 Windows。项目基于 Codex CLI **0.159.2** 的配置和协议开发，后续版本的接口变化可能需要适配。
+本分支使用 **Go** 实现。构建得到一个 `codex-gateway` 可执行文件，使用者不需要安装 Python 或 Go；仍需已安装的 Codex CLI。支持 Linux/macOS，暂不支持原生 Windows。项目沿用 Codex CLI **0.159.2** 的配置与协议，后续客户端版本可能需要适配。
 
 网关仅监听 `127.0.0.1`。它转发 Responses 请求，不做 Anthropic Messages 或 Chat Completions 协议转换。供应商必须支持 Codex 实际使用的 Responses 请求、工具调用和流式事件。
 
 API key 供应商使用 Bearer 认证，只接收白名单内的协议请求头；客户端 Cookie、账号标识和任意自定义认证头不会原样转发。Responses URL 的查询参数也不受支持，包括在 base URL 中附加参数。依赖专用请求头或 `?api-version=...` 等查询参数的入口，需要先提供兼容的前置适配服务。
 
-## 安装与源码运行
+## 构建与使用
 
-在仓库目录中安装到当前 Python 环境：
+当前分支尚未发布预编译 Release。开发者构建一次后，可以把对应系统和架构的二进制分发给使用者。
+
+开发环境使用 `mise` 管理 Go 版本，项目 `mise.toml` 固定 Go 1.27.1；依赖由 Go Modules 管理，版本和校验值保存在 `go.mod` / `go.sum`。安装 mise 后，在仓库目录运行：
 
 ```bash
-python3 -m pip install .
+mise trust
+mise install
+mise exec -- bash scripts/build.sh
+```
+
+如果 Go 已在当前终端的 PATH 中，直接运行 `bash scripts/build.sh` 即可。默认输出 `dist/<系统>_<架构>/codex-gateway`，例如 Linux x86_64 为 `dist/linux_amd64/codex-gateway`。项目仅有 TOML 解析库这一项运行依赖，它会编译进程序；构建使用 `CGO_ENABLED=0`。
+
+把二进制放入 PATH 中的目录后：
+
+```bash
+codex-gateway --version
 codex-gateway --help
 ```
 
-如果已安装 pipx，也可以用 `pipx install .` 创建隔离环境。项目尚未承诺 PyPI 发布，上面的 `.` 表示安装当前检出目录。
-
-直接从源码运行无需安装：
+源码开发可以一条命令构建并运行：
 
 ```bash
 bash scripts/run.sh --help
-bash scripts/run.sh --version
+bash scripts/run.sh --home /absolute/path/to/private-gateway run
 ```
 
-`scripts/run.sh` 把仓库的绝对 `src/` 路径加入 `PYTHONPATH`，转发全部参数；完成下方配置后，无参数执行 `bash scripts/run.sh` 即可启动。以下命令中的 `codex-gateway` 均可替换为 `bash scripts/run.sh`。
+`run.sh` 会先构建持久二进制，再运行它。无参数执行时默认启动 `run`；以下命令中的 `codex-gateway` 均可替换为 `bash scripts/run.sh`。
+
+交叉构建使用同一入口：
+
+```bash
+GOOS=linux GOARCH=arm64 bash scripts/build.sh
+GOOS=darwin GOARCH=arm64 bash scripts/build.sh
+```
 
 ## 快速开始：仅使用 API 供应商
 
@@ -203,28 +220,16 @@ codex-gateway config set retry_invalid_encrypted_reasoning true
 
 ## 开发检查
 
-代码和文档开发在独立 Git worktree 中进行。仓库内的本地检查通过一个脚本启动：
+代码和文档开发在独立 Git worktree 中进行。统一验证入口：
 
 ```bash
-bash scripts/check.sh
+mise exec -- bash scripts/check.sh
 ```
 
-脚本执行 `python3 -m unittest discover -s tests`，每次新建 `runs/_tests/check_<UTC时间>_<进程号>/`，保存 `test.log` 和 `exit-code.txt`。它在终端显示结果摘要，失败时输出完整测试日志；退出码保留测试结果。测试目录中的本地模拟服务用于协议和生命周期检查，不能替代真实 Codex 与供应商的端到端验证。
+脚本运行 `go mod verify`、`go vet ./...`、`go test -race ./...`，然后构建并运行真实二进制。每次建立唯一的 `runs/_tests/check_<UTC时间>_<随机后缀>/`，保存工具链版本、依赖快照、测试日志、构建产物和退出码。
 
-2026-09-30 在 Linux、Python 3.12、Codex 0.159.2 下完成：53 项自动化测试、wheel 构建与隔离安装、原生 CLI 参数合并对照、交互式双模型菜单，以及无 ChatGPT 登录模式下两条 Responses 入口的固定回答检查。真实供应商配置与实测记录保存在仓库外，不随代码分发；这些检查不代表所有模型或上游均兼容。
+测试使用本地模拟上游、假的 Codex 启动器与独立配置目录，检查路由、流式转发、凭据隔离、后台生命周期以及参数合并。Go 分支的验证结果只覆盖实际执行过的检查，不沿用此前 Python 实现的真实供应商验证结论。真实上游的可用性、跨供应商会话兼容和模型质量需要另行验证。
 
-### 可选真实检查
+2026-09-30 使用 Go 1.27.1 在 Linux amd64 完成依赖校验、`go vet`、全量 `-race` 测试和独立二进制检查。测试子进程的 `PATH` 不含 Go/Python，仍能启动网关、转发模拟 SSE 请求并保留假 Codex 的退出码。Linux amd64/arm64、macOS amd64/arm64 四个目标均编译成功；其他架构产物只做了交叉编译，实际运行验证限于 Linux amd64。
 
-配置好供应商、模型和密钥后，可以通过真实 Codex CLI 检查调用链路。**这会向所选上游发送真实请求，消耗上游额度。** 每个模型别名启动一次小任务，要求返回固定字符串；客户端或网关的重试可能增加实际请求次数。
-
-```bash
-python3 scripts/smoke_codex.py \
-  --gateway-home ~/.config/codex-gateway \
-  --model example/coding
-```
-
-把 `--gateway-home` 换成你的网关配置目录，`--model` 换成已配置的别名；可以重复提供 `--model` 检查多个模型。脚本默认在 `PATH` 中寻找 `codex-gateway` 和 `codex`，也可通过 `--gateway-bin`、`--codex-bin` 指定可执行文件。`--effort` 可指定这些模型均支持的推理档位，`--timeout` 设置每个模型任务的等待秒数，默认 180 秒。
-
-检查使用指定网关配置中的 Codex home。需要隔离日常会话环境时，先用单独的 `--home` 目录执行 `init --codex-home /absolute/path/to/test-codex-home`，建立独立测试配置，并按上述流程配置认证模式、模板、供应商和模型。
-
-每次运行默认在私人网关配置目录下新建 `runs/_tests/live_codex_<UTC时间>_<唯一后缀>/`，保存各模型的命令快照、JSON 事件、错误日志、回答、退出码，以及汇总 `report.json`。可用 `--output-root` 更改归档根目录，实际供应商的实测资料应继续保存在源码仓库外。通过只表示对应模型完成了这次固定回答检查，不代表跨供应商续聊、所有工具调用或模型质量已经验证。
+供应商地址、模型映射、API key 和真实请求日志都属于私人配置，应保存在仓库外。仓库只包含通用示例和本地模拟测试。

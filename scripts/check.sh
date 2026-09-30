@@ -1,26 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GATEWAY_PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-GATEWAY_CHECK_ROOT="${GATEWAY_PROJECT_ROOT}/runs/_tests"
-GATEWAY_CHECK_DIR="${GATEWAY_CHECK_ROOT}/check_$(date -u +%Y%m%dT%H%M%SZ)_$$"
-export PYTHONPATH="${GATEWAY_PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-
-mkdir -p -- "${GATEWAY_CHECK_ROOT}"
-# A collision is an error: never append to or overwrite an earlier check.
-mkdir -- "${GATEWAY_CHECK_DIR}"
-cd -- "${GATEWAY_PROJECT_ROOT}"
-
-GATEWAY_CHECK_CODE=0
-python3 -m unittest discover -s tests >"${GATEWAY_CHECK_DIR}/test.log" 2>&1 || GATEWAY_CHECK_CODE=$?
-printf '%s\n' "${GATEWAY_CHECK_CODE}" >"${GATEWAY_CHECK_DIR}/exit-code.txt"
-
-if [ "${GATEWAY_CHECK_CODE}" -eq 0 ]; then
-  printf '检查通过。结果目录：%s\n' "${GATEWAY_CHECK_DIR}"
-  tail -n 4 -- "${GATEWAY_CHECK_DIR}/test.log"
-else
-  printf '检查失败（退出码 %s）。结果目录：%s\n' "${GATEWAY_CHECK_CODE}" "${GATEWAY_CHECK_DIR}" >&2
-  cat -- "${GATEWAY_CHECK_DIR}/test.log" >&2
-fi
-
-exit "${GATEWAY_CHECK_CODE}"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$project_root"
+mkdir -p runs/_tests
+run_dir="$(mktemp -d "$project_root/runs/_tests/check_$(date -u +%Y%m%dT%H%M%SZ)_XXXXXX")"
+trap 'result=$?; printf "%s\n" "$result" > "$run_dir/exit-code"' EXIT
+go version > "$run_dir/toolchain.txt"
+cp go.mod go.sum mise.toml "$run_dir/"
+printf 'Validation output: %s\n' "$run_dir"
+go mod verify 2>&1 | tee "$run_dir/modules.log"
+go vet ./... 2>&1 | tee "$run_dir/vet.log"
+go test -race -count=1 -timeout=120s ./... 2>&1 | tee "$run_dir/tests.log"
+OUTPUT="$run_dir/codex-gateway" bash scripts/build.sh 2>&1 | tee "$run_dir/build.log"
+"$run_dir/codex-gateway" --version | tee "$run_dir/version.txt"

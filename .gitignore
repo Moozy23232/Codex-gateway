@@ -17,3 +17,5 @@ dist/
 *.sqlite*
 .codex-gateway/
 /runs/
+/mise.local.toml
+/.mise.local.toml
