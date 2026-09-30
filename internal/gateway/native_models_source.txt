@@ -1,0 +1,10 @@
+Source: https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/models-manager/models.json
+Release: rust-v0.159.2 (Codex 0.159.2)
+Commit: ff6aec96948b70d94983af2641a6b67c94faeff5
+Original Git blob: 77e0389c56000ca19df5029278c30c3e9528af51
+
+native_models_builtin.json is the unmodified public model catalog from this release.
+It supplies offline capabilities without requiring an account login. Account model
+availability still comes from native account discovery. Fresh native model caches
+have priority. No personal cache, account configuration, or credentials are bundled.
+See native_models_LICENSE.txt and native_models_NOTICE.txt for upstream terms.
