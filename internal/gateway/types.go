@@ -23,6 +23,7 @@ type Config struct {
 type Provider struct {
 	BaseURL           string `json:"base_url"`
 	Auth              string `json:"auth"`
+	AutoModels        bool   `json:"auto_models,omitempty"`
 	APIKeyEnv         string `json:"api_key_env,omitempty"`
 	APIKeyFile        string `json:"api_key_file,omitempty"`
 	Proxy             string `json:"proxy,omitempty"`
@@ -33,6 +34,8 @@ type Model struct {
 	Provider    string `json:"provider"`
 	Model       string `json:"model"`
 	Template    string `json:"template"`
+	NativeModel string `json:"native_model,omitempty"`
+	Managed     bool   `json:"managed,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
 }
 

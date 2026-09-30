@@ -626,9 +626,14 @@ func RunCodex(home string, args []string, codexExecutable string) (int, error) {
 	if _, err := Start(home); err != nil {
 		return 1, err
 	}
+	return runCodexChild(executable, arguments, env, os.Stdin, os.Stdout, os.Stderr)
+}
+
+func runCodexChild(executable string, arguments, env []string, in io.Reader, out, errOut io.Writer) (int, error) {
+	env = replaceEnvironment(env, "CODEX_GATEWAY_WRAPPER_INVOCATION", wrappedInvocationSignature(arguments))
 	command := exec.Command(executable, arguments...)
 	command.Env = env
-	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	command.Stdin, command.Stdout, command.Stderr = in, out, errOut
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)

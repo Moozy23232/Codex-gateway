@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Read a byte at a time: buffering stdin here would consume bytes intended for
@@ -121,7 +123,7 @@ func addProvider(home string, args []string, in io.Reader, out io.Writer) error 
 	}
 	var secret string
 	if *official {
-		p.Auth, p.BaseURL = "codex", officialBaseURL
+		p.Auth, p.BaseURL, p.AutoModels = "codex", officialBaseURL, true
 	} else {
 		p.Auth = "api_key"
 		if p.BaseURL == "" {
@@ -189,6 +191,14 @@ func addProvider(home string, args []string, in io.Reader, out io.Writer) error 
 		p.APIKeyFile = keyPath
 		cfg.Providers[name] = p
 	}
+	if *official {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		_, syncErr := SyncOfficialModels(ctx, home, cfg)
+		cancel()
+		if syncErr != nil {
+			fmt.Fprintln(out, "Official login is ready. The model list will refresh automatically when available.")
+		}
+	}
 	if err := SaveConfig(home, cfg); err != nil {
 		// SaveConfig may have saved config.json before a later I/O error.
 		// Never delete a key that the persisted configuration already references.
@@ -200,7 +210,11 @@ func addProvider(home string, args []string, in io.Reader, out io.Writer) error 
 		}
 		return err
 	}
-	fmt.Fprintf(out, "Added provider %s. Next: codex-gateway add-model --provider %s\n", name, name)
+	if *official {
+		fmt.Fprintf(out, "Added official provider %s. Use codex or codex resume; no add-model step is needed.\n", name)
+	} else {
+		fmt.Fprintf(out, "Added provider %s. Next: codex-gateway add-model --provider %s\n", name, name)
+	}
 	return nil
 }
 
@@ -244,10 +258,25 @@ func addModel(home string, args []string, in io.Reader, out io.Writer) error {
 	alias := f.String("alias", "", "Codex model alias (default: provider/model ID)")
 	f.StringVar(&m.DisplayName, "display-name", "", "name shown in Codex")
 	f.StringVar(&options.Template, "template", "", "optional compatible catalog template slug")
+	f.StringVar(&options.NativeModel, "gpt-model", "", "corresponding GPT model when the provider uses a different model name")
 	f.IntVar(&options.ContextWindow, "context-window", 0, "known model context window; otherwise use template or conservative default")
 	f.StringVar(&options.ReasoningEffort, "reasoning-effort", "", "supported reasoning effort; generic models do not enable reasoning by default")
 	def := f.Bool("default", false, "make this the default model")
 	replace := f.Bool("replace", false, "replace an existing model alias")
+	f.Usage = func() {
+		fmt.Fprint(out, `Usage: codex-gateway [--home DIRECTORY] add-model [MODEL_ID] [OPTIONS]
+
+Select a third-party provider and model. GPT capabilities are matched automatically.
+Official models are loaded automatically and do not need this command.
+
+  --provider NAME   Provider to use (selected automatically when there is only one)
+  --gpt-model ID    Corresponding GPT model if the provider uses a custom name
+  --alias NAME      Optional name for this route in Codex
+  --default         Make this the default model
+  --replace         Replace an existing route
+
+`)
+	}
 	positions, err := parseFlags(f, args)
 	if err != nil {
 		return err
@@ -267,10 +296,16 @@ func addModel(home string, args []string, in io.Reader, out io.Writer) error {
 	}
 	if m.Provider == "" {
 		names := make([]string, 0, len(cfg.Providers))
-		for name := range cfg.Providers {
-			names = append(names, name)
+		for name, provider := range cfg.Providers {
+			if !provider.AutoModels || provider.Auth != "codex" {
+				names = append(names, name)
+			}
 		}
 		sort.Strings(names)
+		if len(names) == 0 {
+			fmt.Fprintln(out, "Official models are loaded automatically. Use codex to choose one.")
+			return nil
+		}
 		if len(names) == 1 {
 			m.Provider = names[0]
 		} else {
@@ -288,6 +323,13 @@ func addModel(home string, args []string, in io.Reader, out io.Writer) error {
 	}
 	if _, ok := cfg.Providers[m.Provider]; !ok {
 		return errors.New("unknown provider; use provider list to see configured names")
+	}
+	if cfg.Providers[m.Provider].AutoModels && cfg.Providers[m.Provider].Auth == "codex" {
+		if err := RefreshOfficialAfterLogin(home, cfg); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "Official models are loaded automatically. Use codex to choose one.")
+		return nil
 	}
 	if len(positions) == 1 {
 		m.Model = positions[0]
@@ -323,9 +365,28 @@ func addModel(home string, args []string, in io.Reader, out io.Writer) error {
 		return err
 	}
 	m.Template, err = PrepareModelTemplate(home, cfg, m.Model, options)
+	if errors.Is(err, ErrModelNeedsGPTMapping) {
+		choices, choicesErr := GetNativeModelChoices(home, cfg)
+		if choicesErr != nil {
+			return choicesErr
+		}
+		fmt.Fprintln(out, "This provider uses a custom model name. Select its corresponding GPT model:")
+		for i, choice := range choices {
+			fmt.Fprintf(out, "%d. %s\n", i+1, choice.ID)
+		}
+		options.NativeModel, err = setupPrompt(in, out, "GPT model (number or model ID): ")
+		if err != nil {
+			return err
+		}
+		if n, err := strconv.Atoi(options.NativeModel); err == nil && n > 0 && n <= len(choices) {
+			options.NativeModel = choices[n-1].ID
+		}
+		m.Template, err = PrepareModelTemplate(home, cfg, m.Model, options)
+	}
 	if err != nil {
 		return err
 	}
+	m.NativeModel = options.NativeModel
 	if m.DisplayName == "" {
 		m.DisplayName = m.Model + " · " + m.Provider
 	}
@@ -333,7 +394,7 @@ func addModel(home string, args []string, in io.Reader, out io.Writer) error {
 	if err := SaveConfig(home, cfg); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Added model %s. Run codex-gateway to open Codex.\n", *alias)
+	fmt.Fprintf(out, "Added model %s. Use codex or codex resume.\n", *alias)
 	return nil
 }
 

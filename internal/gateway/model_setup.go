@@ -19,6 +19,7 @@ import (
 
 type ModelTemplateOptions struct {
 	Template        string
+	NativeModel     string
 	ContextWindow   int
 	ReasoningEffort string
 }
@@ -29,9 +30,8 @@ type ModelChoice struct {
 }
 
 const (
-	genericContextWindow = 32000
-	modelListMaxBytes    = 4 << 20
-	modelListMaxItems    = 10000
+	modelListMaxBytes = 4 << 20
+	modelListMaxItems = 10000
 )
 
 func validModelIdentifier(value string) bool {
@@ -47,6 +47,12 @@ func validateModelTemplateOptions(modelID string, options ModelTemplateOptions) 
 	if options.Template != "" && !validModelIdentifier(options.Template) {
 		return errors.New("invalid template identifier")
 	}
+	if options.NativeModel != "" && !validModelIdentifier(options.NativeModel) {
+		return errors.New("invalid GPT model identifier")
+	}
+	if options.Template != "" && options.NativeModel != "" {
+		return errors.New("choose either --gpt-model or the advanced --template option")
+	}
 	if options.ContextWindow < 0 || options.ContextWindow > 1_000_000_000 {
 		return errors.New("context window must be between 1 and 1000000000 tokens")
 	}
@@ -60,8 +66,8 @@ func validateModelTemplateOptions(modelID string, options ModelTemplateOptions) 
 	return nil
 }
 
-// PrepareModelTemplate selects exact known metadata or creates a conservative
-// text-only template. It never chooses another model's capabilities implicitly.
+// PrepareModelTemplate uses an exact native model or an explicit advanced
+// template. Unknown model names never silently acquire invented capabilities.
 // The returned template is stored separately from the model route; callers save
 // their validated route with SaveConfig after this succeeds.
 func PrepareModelTemplate(home string, cfg *Config, modelID string, options ModelTemplateOptions) (string, error) {
@@ -77,27 +83,33 @@ func PrepareModelTemplate(home string, cfg *Config, modelID string, options Mode
 		return "", err
 	}
 	wanted := modelID
+	var source map[string]any
 	if options.Template != "" {
 		wanted = options.Template
-	}
-	source := findModelTemplate(catalog, wanted)
-	inCatalog := source != nil
-	if source == nil {
-		// Codex may have refreshed its cache since this gateway was initialized.
-		// A missing or invalid external cache does not prevent manual setup.
-		if native, err := discoverTemplates(cfg.CodexHome, ""); err == nil {
-			source = findModelTemplate(native, wanted)
+		source = findModelTemplate(catalog, wanted)
+		if source == nil {
+			if native, err := discoverTemplates(cfg.CodexHome, ""); err == nil {
+				source = findModelTemplate(native, wanted)
+			}
 		}
-	}
-	if source == nil && options.Template != "" {
-		return "", fmt.Errorf("unknown template %s; choose an imported template or omit --template", options.Template)
-	}
-	if source != nil && inCatalog && options.ContextWindow == 0 && options.ReasoningEffort == "" {
-		return wanted, nil
-	}
-	generic := source == nil
-	if generic {
-		source = genericModelTemplate(modelID)
+		if source == nil {
+			return "", fmt.Errorf("unknown template %s; choose an imported template or omit --template", wanted)
+		}
+	} else {
+		if options.NativeModel != "" {
+			wanted = options.NativeModel
+		}
+		native, err := nativeModelsForSetup(home, cfg)
+		if err != nil {
+			return "", err
+		}
+		source = findModelTemplate(native, wanted)
+		if source == nil || !nativeModelInfoValid(source) {
+			if options.NativeModel == "" && !strings.HasPrefix(modelID, "gpt-") {
+				return "", fmt.Errorf("%w: specify --gpt-model for %s", ErrModelNeedsGPTMapping, modelID)
+			}
+			return "", fmt.Errorf("no exact native capabilities for %s; select a known --gpt-model or update the native model catalog", wanted)
+		}
 	}
 	encoded, err := json.Marshal(source)
 	if err != nil {
@@ -113,15 +125,19 @@ func PrepareModelTemplate(home string, cfg *Config, modelID string, options Mode
 		setTemplateContext(item, options.ContextWindow)
 	}
 	if effort := options.ReasoningEffort; effort != "" {
-		if generic {
-			item["supported_reasoning_levels"] = []any{map[string]any{"effort": effort, "description": "Configured reasoning effort"}}
-		} else if !templateSupportsEffort(item, effort) {
+		if !templateSupportsEffort(item, effort) {
 			return "", fmt.Errorf("template %s does not advertise reasoning effort %s", wanted, effort)
 		}
 		item["default_reasoning_level"] = effort
 	}
 	slug := wanted
-	if generic || options.ContextWindow != 0 || options.ReasoningEffort != "" {
+	changedSource := false
+	if existing := findModelTemplate(catalog, wanted); existing != nil {
+		left, _ := json.Marshal(existing)
+		right, _ := json.Marshal(item)
+		changedSource = !bytes.Equal(left, right)
+	}
+	if changedSource || options.ContextWindow != 0 || options.ReasoningEffort != "" {
 		// JSON map encoding sorts keys. Content-derived names preserve templates
 		// referenced by existing routes and make repeated setup idempotent.
 		encoded, err = json.Marshal(item)
@@ -177,26 +193,6 @@ func setTemplateContext(item map[string]any, window int) {
 	item["auto_compact_token_limit"] = limit
 }
 
-func genericModelTemplate(modelID string) map[string]any {
-	item := map[string]any{
-		"slug": modelID, "display_name": modelID,
-		"description":             "Generic Responses model; capabilities and context budget can be configured.",
-		"default_reasoning_level": "none", "supported_reasoning_levels": []any{},
-		"shell_type": "shell_command", "visibility": "list", "supported_in_api": true, "priority": 0,
-		"base_instructions": "You are a coding assistant. Follow the user instructions and use available tools when appropriate.",
-		"input_modalities":  []any{"text"}, "support_verbosity": false,
-		"supports_reasoning_summaries": false, "supports_reasoning_summary_parameter": false,
-		"supports_parallel_tool_calls": false, "supports_search_tool": false,
-		"supports_image_detail_original": false, "prefer_websockets": false,
-		"apply_patch_tool_type": nil, "web_search_tool_type": "text",
-		"truncation_policy":            map[string]any{"mode": "tokens", "limit": 8000},
-		"experimental_supported_tools": []any{}, "use_responses_lite": false,
-		"additional_speed_tiers": []any{}, "service_tiers": []any{},
-	}
-	setTemplateContext(item, genericContextWindow)
-	return item
-}
-
 // DiscoverProviderModels does not initialize or save configuration. Discovery
 // failure leaves callers free to accept an exact model ID manually.
 func DiscoverProviderModels(home string, cfg *Config, providerName string) ([]ModelChoice, error) {
@@ -208,7 +204,7 @@ func DiscoverProviderModels(home string, cfg *Config, providerName string) ([]Mo
 		return nil, errors.New("unknown provider")
 	}
 	if provider.Auth == "codex" {
-		return discoverOfficialModels(home, cfg)
+		return discoverOfficialModels(home, cfg, provider)
 	}
 	key, err := ResolveAPIKey(provider)
 	if err != nil {
@@ -281,46 +277,23 @@ func cleanModelChoices(choices []ModelChoice) ([]ModelChoice, error) {
 	return clean, nil
 }
 
-func discoverOfficialModels(home string, cfg *Config) ([]ModelChoice, error) {
+func discoverOfficialModels(home string, cfg *Config, provider Provider) ([]ModelChoice, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	choices := []ModelChoice{}
-	cursor := ""
-	seenCursors := map[string]bool{}
-	for page := 0; page < 100; page++ {
-		params := map[string]any{"limit": 100, "includeHidden": false}
-		if cursor != "" {
-			params["cursor"] = cursor
-		}
-		var response struct {
-			Data []struct {
-				ID          string `json:"id"`
-				Model       string `json:"model"`
-				DisplayName string `json:"displayName"`
-			} `json:"data"`
-			NextCursor *string `json:"nextCursor"`
-		}
-		if err := nativeCodexRPC(ctx, home, cfg, "model/list", params, &response); err != nil {
-			return nil, err
-		}
-		if response.Data == nil || len(response.Data)+len(choices) > modelListMaxItems {
-			return nil, errors.New("native Codex returned an invalid or oversized model list")
-		}
-		for _, item := range response.Data {
-			id := item.Model
-			if id == "" {
-				id = item.ID
-			}
-			choices = append(choices, ModelChoice{ID: id, DisplayName: item.DisplayName})
-		}
-		if response.NextCursor == nil || *response.NextCursor == "" {
-			return cleanModelChoices(choices)
-		}
-		cursor = *response.NextCursor
-		if seenCursors[cursor] {
-			return nil, errors.New("native Codex returned a repeated model-list cursor")
-		}
-		seenCursors[cursor] = true
+	snapshot, err := loadOfficialModelSnapshot(ctx, home, cfg, provider)
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.New("native Codex model list exceeded the page limit")
+	choices := []ModelChoice{}
+	for _, item := range snapshot.Choices {
+		if item.Hidden {
+			continue
+		}
+		id := item.Model
+		if id == "" {
+			id = item.ID
+		}
+		choices = append(choices, ModelChoice{ID: id, DisplayName: item.DisplayName})
+	}
+	return cleanModelChoices(choices)
 }

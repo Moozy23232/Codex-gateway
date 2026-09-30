@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -179,6 +180,13 @@ func TestPackageNativeReleaseAndCurlInstall(t *testing.T) {
 	}))
 	defer server.Close()
 	installDir := filepath.Join(work, "installed tools with spaces")
+	if err := os.Mkdir(installDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	const originalLauncher = "#!/bin/sh\n[ \"$1\" = --version ] || exit 13\nprintf '%s\\n' 'fixture-native-codex'\n"
+	if err := os.WriteFile(filepath.Join(installDir, "codex"), []byte(originalLauncher), 0755); err != nil {
+		t.Fatal(err)
+	}
 	command := exec.Command("bash", "-o", "pipefail", "-c",
 		`curl --fail --silent --show-error --noproxy '*' "$1" | bash -s -- --version "$2" --install-dir "$3"`,
 		"release-install-test", server.URL+prefix+"install.sh", "v"+version, installDir)
@@ -190,6 +198,27 @@ func TestPackageNativeReleaseAndCurlInstall(t *testing.T) {
 		t.Fatalf("curl installer against real package: %v\n%s", err, output)
 	}
 	requireVersion(t, filepath.Join(installDir, "codex-gateway"), version)
+	target, err := os.Readlink(filepath.Join(installDir, "codex"))
+	if err != nil || target != "codex-gateway" {
+		t.Fatalf("ordinary codex entry was not installed: %q (%v)", target, err)
+	}
+	var manifest struct {
+		Version            int    `json:"version"`
+		OriginalExecutable string `json:"original_executable"`
+	}
+	rawManifest, err := os.ReadFile(filepath.Join(installDir, "codex-gateway.install.json"))
+	if err != nil || json.Unmarshal(rawManifest, &manifest) != nil || manifest.Version != 1 || !filepath.IsAbs(manifest.OriginalExecutable) {
+		t.Fatalf("original launcher manifest is invalid: %q (%v)", rawManifest, err)
+	}
+	preserved, err := os.ReadFile(manifest.OriginalExecutable)
+	if err != nil || string(preserved) != originalLauncher {
+		t.Fatalf("installer did not preserve the existing launcher: %q (%v)", preserved, err)
+	}
+	launcher := exec.Command(filepath.Join(installDir, "codex"), "--version")
+	launcher.Env = []string{"PATH=/nonexistent", "HOME=" + filepath.Join(work, "isolated home"), "CODEX_HOME=" + filepath.Join(work, "isolated codex"), "CODEX_GATEWAY_HOME=" + filepath.Join(work, "isolated gateway")}
+	if output, err := launcher.CombinedOutput(); err != nil || string(output) != "fixture-native-codex\n" {
+		t.Fatalf("installed codex entry did not preserve the native launcher: %q (%v)", output, err)
+	}
 	requestsMu.Lock()
 	defer requestsMu.Unlock()
 	for _, name := range names {

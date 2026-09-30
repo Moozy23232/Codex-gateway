@@ -13,15 +13,27 @@ import (
 	"strings"
 )
 
-const help = `Codex Gateway — a local multi-provider Responses gateway
+const help = `Codex Gateway — provider management for the Codex CLI
 
 Usage: codex-gateway [--home DIRECTORY] [COMMAND]
 
   add-provider  [NAME] [--official] — add a provider, prompting for missing values
-  add-model     [MODEL_ID] [--provider NAME] — add a model and prepare its catalog
-  (no command)  Start the gateway and open Codex
+  add-model     [MODEL_ID] [--provider NAME] — select a provider and GPT model
+  provider      list | remove NAME
+  model         list | remove NAME
+  status        Inspect the background gateway
+  stop          Stop an idle gateway
 
-Advanced commands:
+Use codex, codex resume and codex exec for normal work after installation.
+Official models are loaded automatically. API keys entered interactively are
+stored in private files. Use COMMAND --help for options, or --help-advanced
+for the compatibility commands and diagnostic settings.
+`
+
+const advancedHelp = `Advanced Codex Gateway commands
+
+Usage: codex-gateway [--home DIRECTORY] COMMAND
+
   init          Initialize private configuration (--auth-mode codex|token)
   provider      add NAME --base-url URL --api-key-env NAME | list | remove NAME
   model         add ALIAS --provider NAME --upstream-model ID --template SLUG | list | remove ALIAS
@@ -104,6 +116,14 @@ func ExecuteWithInput(args []string, in io.Reader, out, errOut io.Writer) int {
 			fmt.Fprint(out, help)
 			return 0
 		}
+		if args[0] == "--help-advanced" {
+			fmt.Fprint(out, advancedHelp)
+			return 0
+		}
+		if args[0] == "--licenses" {
+			fmt.Fprintln(out, NativeModelNotices())
+			return 0
+		}
 		if args[0] == "--version" {
 			fmt.Fprintln(out, Version)
 			return 0
@@ -152,6 +172,17 @@ func ExecuteWithInput(args []string, in io.Reader, out, errOut io.Writer) int {
 func dispatch(home string, args []string, out, errOut io.Writer) (int, error) {
 	command, args := args[0], args[1:]
 	switch command {
+	case "__install":
+		f := newFlags("__install", errOut)
+		dir := f.String("install-dir", "", "installation directory")
+		positions, err := parseFlags(f, args)
+		if err != nil {
+			return 0, err
+		}
+		if len(positions) != 0 || *dir == "" {
+			return 0, errors.New("internal installer requires --install-dir")
+		}
+		return 0, InstallGateway(*dir)
 	case "init":
 		f := newFlags("init", out)
 		var options InitOptions
@@ -228,7 +259,7 @@ func configure(home, command string, args []string, out io.Writer) error {
 			break
 		}
 		if arg == "--help" || arg == "-h" {
-			fmt.Fprint(out, help)
+			fmt.Fprint(out, advancedHelp)
 			return nil
 		}
 	}

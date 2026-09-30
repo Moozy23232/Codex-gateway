@@ -30,25 +30,11 @@ func ensureNativeHome(cfg *Config) error {
 	return nil
 }
 
-func codexExecutablePath(explicit string) (string, error) {
-	if explicit == "" {
-		explicit = os.Getenv("CODEX_GATEWAY_CODEX_BIN")
-	}
-	if explicit == "" {
-		explicit = "codex"
-	}
-	path, err := exec.LookPath(explicit)
-	if err != nil {
-		return "", errors.New("cannot find an executable Codex CLI; install Codex or set CODEX_GATEWAY_CODEX_BIN")
-	}
-	return path, nil
-}
-
 // These overrides apply only to this child. The user's config.toml and selected
 // provider are never rewritten. File storage lets native Codex own refreshes
 // while the gateway reads the resulting access token without copying it.
 func nativeCodexCommand(ctx context.Context, home string, cfg *Config, args ...string) (*exec.Cmd, error) {
-	executable, err := codexExecutablePath("")
+	executable, err := nativeCodexExecutablePath()
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +78,10 @@ func nativeCodexRPC(parent context.Context, home string, cfg *Config, method str
 	if err != nil {
 		return err
 	}
+	return runNativeCodexRPC(ctx, command, method, params, result)
+}
+
+func runNativeCodexRPC(ctx context.Context, command *exec.Cmd, method string, params, result any) error {
 	input, err := command.StdinPipe()
 	if err != nil {
 		return errors.New("cannot open native Codex input")
@@ -109,7 +99,7 @@ func nativeCodexRPC(parent context.Context, home string, cfg *Config, method str
 	}
 	defer func() {
 		input.Close()
-		cancel()
+		_ = command.Process.Kill()
 		_ = command.Wait()
 	}()
 	encoder := json.NewEncoder(input)

@@ -91,9 +91,14 @@ func officialTestExecutable(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CODEX_GATEWAY_CODEX_BIN", path)
+	launcher := filepath.Join(t.TempDir(), "native-codex")
+	quoted := "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nexec "+quoted+" \"$@\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_GATEWAY_CODEX_BIN", launcher)
 	t.Setenv("CODEX_GATEWAY_OFFICIAL_HELPER", "1")
-	return path
+	return launcher
 }
 
 func TestOfficialNativeProtocolAndChildConfiguration(t *testing.T) {

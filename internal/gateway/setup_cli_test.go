@@ -96,7 +96,7 @@ func TestSetupProviderAndModelWorkWithoutManualInitialization(t *testing.T) {
 		t.Fatal("provider setup invented model routes")
 	}
 	in := &setupNoInput{}
-	setupCall(t, home, in, 0, "add-model", "model-one")
+	setupCall(t, home, in, 0, "add-model", "gpt-6.1-sol")
 	if in.reads != 0 {
 		t.Fatal("one provider plus an explicit model unexpectedly prompted")
 	}
@@ -104,23 +104,66 @@ func TestSetupProviderAndModelWorkWithoutManualInitialization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := cfg.Models["example/model-one"]
-	if first.Provider != "example" || first.Model != "model-one" || first.Template == "" || cfg.DefaultModel != "example/model-one" {
+	first := cfg.Models["example/gpt-6.1-sol"]
+	if first.Provider != "example" || first.Model != "gpt-6.1-sol" || first.Template == "" || cfg.DefaultModel != "example/gpt-6.1-sol" {
 		t.Fatal("automatic route, metadata or first-model default missing")
 	}
 	catalog, err := LoadCatalog(home)
-	if err != nil || len(catalog.Models) != 1 || catalog.Models[0]["slug"] != "example/model-one" {
+	if err != nil || len(catalog.Models) != 1 || catalog.Models[0]["slug"] != "example/gpt-6.1-sol" {
 		t.Fatalf("automatic catalog is not usable: %v", err)
 	}
-	setupCall(t, home, in, 0, "add-model", "model-two")
+	if catalog.Models[0]["context_window"] != json.Number("272000") || !templateSupportsEffort(catalog.Models[0], "high") {
+		t.Fatal("recognized GPT model lost its native context window or reasoning levels")
+	}
+	setupCall(t, home, in, 0, "add-model", "gpt-6-sol")
 	cfg, _ = LoadConfig(home)
-	if cfg.DefaultModel != "example/model-one" {
+	if cfg.DefaultModel != "example/gpt-6.1-sol" {
 		t.Fatal("adding another model changed the user's default")
 	}
-	setupCall(t, home, in, 0, "add-model", "model-three", "--alias", "favorite", "--default")
+	setupCall(t, home, in, 0, "add-model", "gpt-6-astra", "--alias", "favorite", "--default")
 	cfg, _ = LoadConfig(home)
-	if cfg.DefaultModel != "favorite" || cfg.Models["favorite"].Model != "model-three" {
+	if cfg.DefaultModel != "favorite" || cfg.Models["favorite"].Model != "gpt-6-astra" {
 		t.Fatal("explicit alias/default was ignored")
+	}
+}
+
+func TestSetupCustomModelNameOnlyAsksForGPTMapping(t *testing.T) {
+	home := setupTestHome(t)
+	setupAddKeyProvider(t, home, "example")
+	output := setupCall(t, home, strings.NewReader("gpt-6.1-sol\n"), 0, "add-model", "custom-coder")
+	if !strings.Contains(output, "GPT model") || strings.Contains(output, "template") || strings.Contains(output, "catalog") {
+		t.Fatal("custom model setup exposed internal metadata configuration")
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil || cfg.Models["example/custom-coder"].NativeModel != "gpt-6.1-sol" {
+		t.Fatalf("custom GPT mapping was not saved: %v", err)
+	}
+	before := setupSnapshot(t, home)
+	setupCall(t, home, strings.NewReader(""), 2, "add-model", "another-custom-name")
+	if !reflect.DeepEqual(before, setupSnapshot(t, home)) {
+		t.Fatal("canceled GPT mapping changed configuration")
+	}
+}
+
+func TestSetupOfficialProviderIsNotAManualModelChoice(t *testing.T) {
+	home := setupTestHome(t)
+	setupAddKeyProvider(t, home, "example")
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Providers["official"] = Provider{Auth: "codex", BaseURL: officialBaseURL, AutoModels: true}
+	if err := SaveConfig(home, cfg); err != nil {
+		t.Fatal(err)
+	}
+	in := &setupNoInput{}
+	setupCall(t, home, in, 0, "add-model", "gpt-6.1-sol")
+	if in.reads != 0 {
+		t.Fatal("automatically managed official provider caused an extra selection prompt")
+	}
+	cfg, _ = LoadConfig(home)
+	if cfg.Models["example/gpt-6.1-sol"].Provider != "example" {
+		t.Fatal("third-party model was registered under the official provider")
 	}
 }
 
@@ -201,6 +244,9 @@ func TestSetupOfficialUsesNativeLoginAndKeepsThirdPartyIndependent(t *testing.T)
 		t.Fatal(err)
 	}
 	officialTestExecutable(t)
+	// Login itself succeeds; the fake account RPC fails before any HTTP model
+	// discovery. Full automatic discovery uses a local transport in its tests.
+	t.Setenv("CODEX_GATEWAY_OFFICIAL_MODE", "error")
 	record := filepath.Join(t.TempDir(), "login.json")
 	t.Setenv("CODEX_GATEWAY_OFFICIAL_RECORD", record)
 	in := &setupNoInput{}
@@ -232,7 +278,7 @@ func TestSetupOfficialUsesNativeLoginAndKeepsThirdPartyIndependent(t *testing.T)
 func TestSetupInvalidAndCanceledOperationsPreserveConfiguration(t *testing.T) {
 	home := setupTestHome(t)
 	setupAddKeyProvider(t, home, "example")
-	setupCall(t, home, &setupNoInput{}, 0, "add-model", "model-one")
+	setupCall(t, home, &setupNoInput{}, 0, "add-model", "gpt-6.1-sol")
 	before := setupSnapshot(t, home)
 	for _, test := range []struct {
 		name  string
@@ -245,10 +291,10 @@ func TestSetupInvalidAndCanceledOperationsPreserveConfiguration(t *testing.T) {
 		{"invalid key", []string{"add-provider", "second", "--base-url", "https://api.example.invalid/v1"}, "two words\n"},
 		{"two key refs", []string{"add-provider", "second", "--api-key-env", "GATEWAY_SETUP_TEST_KEY", "--api-key-file", "/unused"}, ""},
 		{"official custom URL", []string{"add-provider", "--official", "--base-url", "https://api.example.invalid/v1"}, ""},
-		{"duplicate model", []string{"add-model", "model-one"}, ""},
-		{"unknown provider", []string{"add-model", "model-two", "--provider", "missing"}, ""},
-		{"invalid alias", []string{"add-model", "model-two", "--alias", "invalid alias"}, ""},
-		{"invalid template", []string{"add-model", "model-two", "--template", "missing-template"}, ""},
+		{"duplicate model", []string{"add-model", "gpt-6.1-sol"}, ""},
+		{"unknown provider", []string{"add-model", "gpt-6-sol", "--provider", "missing"}, ""},
+		{"invalid alias", []string{"add-model", "gpt-6-sol", "--alias", "invalid alias"}, ""},
+		{"invalid template", []string{"add-model", "gpt-6-sol", "--template", "missing-template"}, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			setupCall(t, home, strings.NewReader(test.input), 2, test.args...)
@@ -269,7 +315,7 @@ func TestSetupFreshCancellationAndHelpDoNotCreateAHome(t *testing.T) {
 		{"cancel key", []string{"add-provider", "example", "--base-url", "https://api.example.invalid/v1"}, 2},
 		{"provider help", []string{"add-provider", "--help"}, 0},
 		{"model help", []string{"add-model", "--help"}, 0},
-		{"model before provider", []string{"add-model", "model-one"}, 2},
+		{"model before provider", []string{"add-model", "gpt-6.1-sol"}, 2},
 		{"official missing executable", []string{"add-provider", "--official"}, 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -286,18 +332,18 @@ func TestSetupSelectsAmongProvidersAndPreservesDefault(t *testing.T) {
 	home := setupTestHome(t)
 	setupAddKeyProvider(t, home, "alpha")
 	setupAddKeyProvider(t, home, "beta")
-	setupCall(t, home, strings.NewReader("2\n"), 0, "add-model", "model-one")
+	setupCall(t, home, strings.NewReader("2\n"), 0, "add-model", "gpt-6.1-sol")
 	cfg, err := LoadConfig(home)
-	if err != nil || cfg.DefaultModel != "beta/model-one" || cfg.Models[cfg.DefaultModel].Provider != "beta" {
+	if err != nil || cfg.DefaultModel != "beta/gpt-6.1-sol" || cfg.Models[cfg.DefaultModel].Provider != "beta" {
 		t.Fatalf("numbered provider selection failed: %v", err)
 	}
-	setupCall(t, home, strings.NewReader("alpha\n"), 0, "add-model", "model-two")
+	setupCall(t, home, strings.NewReader("alpha\n"), 0, "add-model", "gpt-6-sol")
 	cfg, _ = LoadConfig(home)
-	if cfg.Models["alpha/model-two"].Provider != "alpha" || cfg.DefaultModel != "beta/model-one" {
+	if cfg.Models["alpha/gpt-6-sol"].Provider != "alpha" || cfg.DefaultModel != "beta/gpt-6.1-sol" {
 		t.Fatal("named provider selection or default preservation failed")
 	}
 	before := setupSnapshot(t, home)
-	setupCall(t, home, strings.NewReader(""), 2, "add-model", "model-three")
+	setupCall(t, home, strings.NewReader(""), 2, "add-model", "gpt-6-astra")
 	if !reflect.DeepEqual(before, setupSnapshot(t, home)) {
 		t.Fatal("canceled provider selection changed configuration")
 	}

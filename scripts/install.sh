@@ -3,7 +3,7 @@ set -eu
 
 usage() {
     printf '%s\n' \
-        'Install a released codex-gateway binary without Go or Python.' \
+        'Install codex-gateway and its codex entry without Go or Python.' \
         '' \
         'Usage: sh install.sh [--version VERSION] [--install-dir PATH]' \
         '' \
@@ -224,13 +224,20 @@ else
     fail 'Downloaded binary cannot run on this platform.'
 fi
 [ "$actual_version" = "$version" ] || fail "Downloaded binary does not report release version $version."
-# Check again immediately before rename: mv must never treat a directory (or a
-# symlink to a directory) named codex-gateway as the destination directory.
+# The verified executable installs the binary, codex entry and manifest as one
+# transaction, preserving an existing codex launcher and rolling back failures.
+# Paths are passed as arguments, never interpolated into generated shell code.
 [ ! -d "$destination" ] || fail "Installation target is a directory: $destination"
-mv -f "$staging" "$destination" || fail 'Cannot replace the installed executable.'
+"$staging" __install --install-dir "$install_dir" </dev/null || fail 'Cannot install codex-gateway and its codex entry; see the recovery details above.'
 staging=
 printf 'Installed codex-gateway %s at %s\n' "$version" "$destination"
+printf 'The codex entry is available at %s/codex.\n' "$install_dir"
 case ":${PATH:-}:" in
-    *:"$install_dir":*) ;;
-    *) printf 'Add %s to PATH to run codex-gateway by name.\n' "$install_dir" ;;
+    *:"$install_dir":*)
+        selected_codex=$(command -v codex || :)
+        if [ "$selected_codex" != "$install_dir/codex" ]; then
+            printf 'Move %s to the beginning of PATH so codex uses this installation.\n' "$install_dir"
+        fi
+        ;;
+    *) printf 'Add %s to the beginning of PATH to run codex and codex-gateway by name.\n' "$install_dir" ;;
 esac

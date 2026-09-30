@@ -221,6 +221,9 @@ func ValidateConfig(cfg *Config) error {
 				return err
 			}
 		}
+		if p.AutoModels && (p.Auth != "codex" || strings.TrimRight(p.BaseURL, "/") != officialBaseURL) {
+			return errors.New("automatic models require the official Codex provider")
+		}
 		switch p.Auth {
 		case "codex":
 			if p.APIKeyEnv != "" || p.APIKeyFile != "" {
@@ -254,6 +257,9 @@ func ValidateConfig(cfg *Config) error {
 			if v == "" || len(v) > 512 || hasSpace(v) || hasControl(v) {
 				return fmt.Errorf("model %s requires nonempty model and template identifiers", alias)
 			}
+		}
+		if m.NativeModel != "" && (len(m.NativeModel) > 512 || hasSpace(m.NativeModel) || hasControl(m.NativeModel)) {
+			return fmt.Errorf("model %s has an invalid native model identifier", alias)
 		}
 	}
 	if cfg.DefaultModel != "" {

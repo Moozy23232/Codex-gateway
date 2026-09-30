@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -537,6 +538,48 @@ func lifecycleFakeExecutable(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestWrappedExecStartsOnlyItsGatewayAndPreservesOriginalLauncher(t *testing.T) {
+	t.Setenv("CODEX_GATEWAY_LIFECYCLE_HELPER", "1")
+	t.Setenv("CODEX_GATEWAY_TEST_EXIT", "37")
+	t.Setenv("CODEX_GATEWAY_WRAPPER_INVOCATION", "")
+	f := newLifecycleFixture(t)
+	f.cleanupServer(t)
+	t.Setenv("CODEX_GATEWAY_HOME", f.home)
+	t.Setenv("CODEX_GATEWAY_CODEX_BIN", lifecycleFakeExecutable(t))
+	t.Setenv("CODEX_GATEWAY_NATIVE_CODEX_BIN", "/must-not-query-native-for-api-only-launch")
+	record := filepath.Join(t.TempDir(), "record.json")
+	t.Setenv("CODEX_GATEWAY_TEST_RECORD", record)
+	beforeConfig, _ := os.ReadFile(filepath.Join(f.cfg.CodexHome, "config.toml"))
+	beforeAuth, _ := os.ReadFile(filepath.Join(f.cfg.CodexHome, "auth.json"))
+	var out, errOut bytes.Buffer
+	if code := executeWrapped([]string{"-m", "upstream-model", "exec", "prompt with spaces"}, strings.NewReader(""), &out, &errOut); code != 37 {
+		t.Fatalf("wrapped exec exit = %d, stderr=%s", code, &errOut)
+	}
+	var observed struct {
+		Args []string          `json:"args"`
+		Env  map[string]string `json:"env"`
+	}
+	data, err := os.ReadFile(record)
+	if err != nil || json.Unmarshal(data, &observed) != nil {
+		t.Fatal("original launcher did not run")
+	}
+	if len(observed.Args) < 2 || !reflect.DeepEqual(observed.Args[len(observed.Args)-2:], []string{"exec", "prompt with spaces"}) ||
+		observed.Env["CODEX_GATEWAY_TOKEN"] != lifecycleTestClient || observed.Env["CODEX_HOME"] != f.cfg.CodexHome {
+		t.Fatal("wrapper lost original arguments or gateway routing environment")
+	}
+	if selectedWrappedModel(observed.Args) != "example/model" {
+		t.Fatal("upstream model ID bypassed the configured third-party gateway alias")
+	}
+	if state, err := Status(f.home); err != nil || state["running"] != true {
+		t.Fatalf("wrapped exec did not start its gateway: %v, %v", state, err)
+	}
+	afterConfig, _ := os.ReadFile(filepath.Join(f.cfg.CodexHome, "config.toml"))
+	afterAuth, _ := os.ReadFile(filepath.Join(f.cfg.CodexHome, "auth.json"))
+	if !bytes.Equal(beforeConfig, afterConfig) || !bytes.Equal(beforeAuth, afterAuth) {
+		t.Fatal("wrapped exec changed native configuration or authentication")
+	}
 }
 
 func TestLifecycleRunCodexKeepsWrapperConfigAndExitCode(t *testing.T) {

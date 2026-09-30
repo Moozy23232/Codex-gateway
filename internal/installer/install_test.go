@@ -52,7 +52,15 @@ func archiveWithEntries(t *testing.T, entries map[string]string) []byte {
 }
 
 func versionExecutable(version string) string {
-	return "#!/bin/sh\n[ \"$1\" = --version ] || exit 9\nprintf '%s\\n' '" + version + "'\n"
+	// These small fixtures exercise download/version/platform handling. The Go
+	// transaction is tested directly and with a real release binary separately.
+	return "#!/bin/sh\ncase \"$1\" in\n" +
+		"--version) printf '%s\\n' '" + version + "';;\n" +
+		"__install) [ \"$#\" = 3 ] && [ \"$2\" = --install-dir ] || exit 9\n" +
+		"mv -f \"$0\" \"$3/codex-gateway\" || exit 9\n" +
+		"ln -sf codex-gateway \"$3/codex\" || exit 9\n" +
+		"printf '%s\\n' '{\"version\":1}' > \"$3/codex-gateway.install.json\";;\n" +
+		"*) exit 9;;\nesac\n"
 }
 
 func newRelease(t *testing.T, version, platform, architecture string) *releaseServer {
@@ -147,7 +155,7 @@ func newInstallation(t *testing.T, release *releaseServer, system, machine, chec
 	}
 	// The installer receives a minimal PATH containing real system utilities,
 	// with no Go, Python, jq, inherited credentials or user configuration.
-	for _, name := range []string{"curl", "tar", "gzip", "awk", "mktemp", "mkdir", "mv", "chmod", "rm", checksumTool} {
+	for _, name := range []string{"curl", "tar", "gzip", "awk", "mktemp", "mkdir", "mv", "chmod", "rm", "ln", checksumTool} {
 		path, err := exec.LookPath(name)
 		if err != nil {
 			t.Skipf("installer test requires %s: %v", name, err)
@@ -258,7 +266,7 @@ func TestInstallDirectoriesAndVersionOptions(t *testing.T) {
 				}
 			}
 			if test.flag {
-				directory = filepath.Join(install.home, "flag programs", "bin")
+				directory = filepath.Join(install.home, "flag programs 'quoted' $cash `literal`", "bin")
 				args = append(args, "--install-dir", directory)
 			}
 			if test.inPath {
@@ -306,7 +314,7 @@ func TestInstallPlatformMappingsAndShasum(t *testing.T) {
 }
 
 func TestInstallFailurePreservesExistingBinary(t *testing.T) {
-	for _, name := range []string{"missing release", "checksum HTTP error", "archive HTTP error", "missing checksum", "duplicate checksum", "invalid checksum", "wrong checksum", "wrong binary version", "binary cannot execute", "missing archive member"} {
+	for _, name := range []string{"missing release", "checksum HTTP error", "archive HTTP error", "missing checksum", "duplicate checksum", "invalid checksum", "wrong checksum", "wrong binary version", "binary cannot execute", "missing archive member", "installer transaction failure"} {
 		t.Run(name, func(t *testing.T) {
 			release := newRelease(t, "1.2.3", "linux", "amd64")
 			install := newInstallation(t, release, "Linux", "x86_64", "sha256sum")
@@ -317,6 +325,10 @@ func TestInstallFailurePreservesExistingBinary(t *testing.T) {
 			destination := filepath.Join(directory, "codex-gateway")
 			previous := []byte(versionExecutable("0.9.0"))
 			if err := os.WriteFile(destination, previous, 0700); err != nil {
+				t.Fatal(err)
+			}
+			oldCodex := filepath.Join(directory, "codex")
+			if err := os.WriteFile(oldCodex, []byte("original launcher and backup chain\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
 			release.mu.Lock()
@@ -341,6 +353,8 @@ func TestInstallFailurePreservesExistingBinary(t *testing.T) {
 				release.setArchive(archiveWithEntries(t, map[string]string{"codex-gateway": "#!/bin/sh\nexit 17\n"}))
 			case "missing archive member":
 				release.setArchive(archiveWithEntries(t, map[string]string{"different-file": "not the gateway"}))
+			case "installer transaction failure":
+				release.setArchive(archiveWithEntries(t, map[string]string{"codex-gateway": "#!/bin/sh\n[ \"$1\" = --version ] || exit 17\nprintf '%s\\n' '1.2.3'\n"}))
 			}
 			release.mu.Unlock()
 			output, err := install.run()
@@ -355,12 +369,16 @@ func TestInstallFailurePreservesExistingBinary(t *testing.T) {
 			if err != nil || info.Mode().Perm() != 0700 {
 				t.Fatalf("old binary mode changed: %v, %v", info, err)
 			}
+			contents, err = os.ReadFile(oldCodex)
+			if err != nil || string(contents) != "original launcher and backup chain\n" {
+				t.Fatalf("old codex launcher changed: %q, %v", contents, err)
+			}
 			install.assertClean()
 		})
 	}
 }
 
-func TestInstallUpgradeTouchesOnlySelectedBinary(t *testing.T) {
+func TestInstallUpgradePreservesUnrelatedFiles(t *testing.T) {
 	release := newRelease(t, "1.2.3", "linux", "amd64")
 	install := newInstallation(t, release, "Linux", "x86_64", "sha256sum")
 	install.values["TAR_OPTIONS"] = "--this-option-must-not-be-used"

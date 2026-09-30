@@ -21,7 +21,7 @@ import (
 
 // Opt in with the same native executable as the catalog compatibility test.
 // All account state, provider credentials and HTTP traffic belong to this test.
-func TestNativeSetupStreamsGenericModel(t *testing.T) {
+func TestNativeSetupStreamsMappedGPTModel(t *testing.T) {
 	native := os.Getenv("CODEX_GATEWAY_TEST_CODEX_BIN")
 	if native == "" {
 		t.Skip("set CODEX_GATEWAY_TEST_CODEX_BIN for native setup compatibility")
@@ -35,7 +35,7 @@ func TestNativeSetupStreamsGenericModel(t *testing.T) {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
 	const reply = "native-gateway-stream-confirmed"
-	const model = "native-generic-smoke"
+	const model = "provider-custom-gpt-name"
 	const key = "native-local-fake-api-key"
 	var mu sync.Mutex
 	var requests []map[string]any
@@ -100,7 +100,15 @@ func TestNativeSetupStreamsGenericModel(t *testing.T) {
 		}
 	}
 	requireCall("add-provider", "local", "--base-url", upstream.URL+"/v1", "--api-key-env", "GATEWAY_NATIVE_TEST_KEY")
-	requireCall("add-model", model)
+	requireCall("add-model", model, "--gpt-model", "gpt-6.1-sol")
+	catalog, err := LoadCatalog(home)
+	if err != nil || len(catalog.Models) != 1 {
+		t.Fatalf("mapped catalog is unavailable: %v", err)
+	}
+	metadata := catalog.Models[0]
+	if metadata["context_window"] != json.Number("272000") || metadata["max_context_window"] != json.Number("872000") || metadata["default_reasoning_level"] != "low" || !templateSupportsEffort(metadata, "high") {
+		t.Fatal("provider alias did not inherit complete public native GPT capabilities")
+	}
 	requireCall("config", "set", "listen.port", strconv.Itoa(lifecycleFreePort(t)))
 	defer func() {
 		if output, err := call("stop"); err != nil {
@@ -122,33 +130,9 @@ func TestNativeSetupStreamsGenericModel(t *testing.T) {
 	if body["model"] != model || body["stream"] != true {
 		t.Fatalf("native route or streaming mode changed: model=%v stream=%v", body["model"], body["stream"])
 	}
-	if reasoning, ok := body["reasoning"].(map[string]any); ok && (reasoning["effort"] != "none" || reasoning["summary"] != nil) {
-		t.Fatalf("generic metadata enabled unsupported reasoning: %v", reasoning)
-	}
-	if nativeSetupContainsType(body, "input_image") || nativeSetupContainsType(body, "image_generation") {
-		t.Fatal("generic text-only metadata enabled image input or generation")
+	if reasoning, ok := body["reasoning"].(map[string]any); !ok || reasoning["effort"] != "low" {
+		t.Fatalf("native client did not inherit GPT's default reasoning effort: %v", body["reasoning"])
 	}
 	reasoning, _ := json.Marshal(body["reasoning"])
 	t.Logf("native setup relayed one streamed request: model=%s reasoning=%s; received %q", model, reasoning, reply)
-}
-
-func nativeSetupContainsType(value any, kind string) bool {
-	switch value := value.(type) {
-	case map[string]any:
-		if value["type"] == kind {
-			return true
-		}
-		for _, child := range value {
-			if nativeSetupContainsType(child, kind) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if nativeSetupContainsType(child, kind) {
-				return true
-			}
-		}
-	}
-	return false
 }

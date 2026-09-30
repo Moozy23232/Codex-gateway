@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -28,13 +29,14 @@ func emptyModelSetupHome(t *testing.T) (string, *Config) {
 	return home, cfg
 }
 
-func TestPrepareGenericTemplatePreservesExistingRoutes(t *testing.T) {
+func TestPrepareNativeTemplatePreservesExistingRoutes(t *testing.T) {
 	home, cfg := configFixture(t)
+	t.Setenv("CODEX_GATEWAY_CODEX_BIN", filepath.Join(t.TempDir(), "no-native-process"))
 	original, err := LoadCatalog(home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	slug, err := PrepareModelTemplate(home, cfg, "unlisted-model", ModelTemplateOptions{})
+	slug, err := PrepareModelTemplate(home, cfg, "gpt-6.1-sol", ModelTemplateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,27 +45,22 @@ func TestPrepareGenericTemplatePreservesExistingRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := findModelTemplate(catalog, slug)
-	if !reflect.DeepEqual(item["input_modalities"], []any{"text"}) || len(item["supported_reasoning_levels"].([]any)) != 0 {
-		t.Fatal("generic metadata advertised unsupported capabilities")
+	if !reflect.DeepEqual(item["input_modalities"], []any{"text", "image"}) || !templateSupportsEffort(item, "high") || item["default_reasoning_level"] != "low" {
+		t.Fatal("public native model capabilities were not preserved")
 	}
-	for _, name := range []string{"support_verbosity", "supports_parallel_tool_calls", "supports_search_tool", "supports_reasoning_summaries", "supports_reasoning_summary_parameter", "prefer_websockets"} {
-		if item[name] != false {
-			t.Fatalf("generic metadata enabled %s", name)
-		}
+	if item["context_window"] != json.Number("272000") || item["max_context_window"] != json.Number("872000") || item["auto_compact_token_limit"] != nil || item["model_messages"] == nil {
+		t.Fatal("complete versioned native metadata was not imported")
 	}
-	if item["context_window"] != json.Number("32000") || item["auto_compact_token_limit"] != json.Number("28000") {
-		t.Fatal("generic context budget missing")
-	}
-	cfg.Models["example/unlisted"] = Model{Provider: "example", Model: "unlisted-model", Template: slug}
+	cfg.Models["example/native"] = Model{Provider: "example", Model: "gpt-6.1-sol", NativeModel: "gpt-6.1-sol", Template: slug}
 	if err := SaveConfig(home, cfg); err != nil {
 		t.Fatal(err)
 	}
 	now, _ := LoadCatalog(home)
 	if !reflect.DeepEqual(now.Models[0], original.Models[0]) {
-		t.Fatal("adding a generic template changed existing model metadata")
+		t.Fatal("adding a native template changed existing model metadata")
 	}
 	before, _ := os.ReadFile(filepath.Join(home, "templates.json"))
-	again, err := PrepareModelTemplate(home, cfg, "unlisted-model", ModelTemplateOptions{})
+	again, err := PrepareModelTemplate(home, cfg, "gpt-6.1-sol", ModelTemplateOptions{})
 	after, _ := os.ReadFile(filepath.Join(home, "templates.json"))
 	if err != nil || again != slug || !bytes.Equal(before, after) {
 		t.Fatalf("template generation is not idempotent: %v", err)
@@ -76,19 +73,19 @@ func TestPrepareGenericTemplatePreservesExistingRoutes(t *testing.T) {
 
 func TestPrepareExactTemplateAndIndependentOverrides(t *testing.T) {
 	home, cfg := emptyModelSetupHome(t)
-	known := map[string]any{
-		"slug": "known-model", "context_window": 128000,
-		"supported_reasoning_levels": []any{map[string]any{"effort": "high", "description": "High"}},
-		"nested":                     map[string]any{"precise": json.Number("9007199254740993")},
-	}
+	native, _ := decodeNativeModels(bundledNativeModels)
+	known := findModelTemplate(native, "gpt-6.1-sol")
+	known["slug"], known["context_window"], known["max_context_window"] = "gpt-cache-test", 128000, 128000
+	known["default_reasoning_level"] = "high"
+	known["nested"] = map[string]any{"precise": json.Number("9007199254740993")}
 	if err := WriteJSON(filepath.Join(cfg.CodexHome, "models_cache.json"), Catalog{Models: []map[string]any{known}}); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := PrepareModelTemplate(home, cfg, "known-model", ModelTemplateOptions{})
-	if err != nil || initial != "known-model" {
+	initial, err := PrepareModelTemplate(home, cfg, "gpt-cache-test", ModelTemplateOptions{})
+	if err != nil || initial != "gpt-cache-test" {
 		t.Fatalf("exact cache match not imported: %q, %v", initial, err)
 	}
-	variant, err := PrepareModelTemplate(home, cfg, "known-model", ModelTemplateOptions{ContextWindow: 64000, ReasoningEffort: "high"})
+	variant, err := PrepareModelTemplate(home, cfg, "gpt-cache-test", ModelTemplateOptions{ContextWindow: 64000, ReasoningEffort: "high"})
 	if err != nil || variant == initial {
 		t.Fatalf("override did not get a separate template: %v", err)
 	}
@@ -108,9 +105,15 @@ func TestPrepareExactTemplateAndIndependentOverrides(t *testing.T) {
 	if err != nil || explicit != initial {
 		t.Fatal("explicit template selection failed")
 	}
-	unknown, err := PrepareModelTemplate(home, cfg, "known-model-suffix", ModelTemplateOptions{})
-	if err != nil || unknown == initial || unknown == variant {
-		t.Fatal("non-exact model name inherited known model capabilities")
+	if _, err := PrepareModelTemplate(home, cfg, "gpt-cache-test-suffix", ModelTemplateOptions{}); err == nil {
+		t.Fatal("non-exact GPT model silently inherited capabilities")
+	}
+	if _, err := PrepareModelTemplate(home, cfg, "provider-alias", ModelTemplateOptions{}); !errors.Is(err, ErrModelNeedsGPTMapping) {
+		t.Fatalf("unknown provider alias did not request a GPT mapping: %v", err)
+	}
+	mapped, err := PrepareModelTemplate(home, cfg, "provider-alias", ModelTemplateOptions{NativeModel: "gpt-cache-test"})
+	if err != nil || mapped != initial {
+		t.Fatalf("explicit GPT mapping did not reuse exact native metadata: %v", err)
 	}
 }
 
@@ -127,6 +130,8 @@ func TestPrepareTemplateRejectsOptionsWithoutWriting(t *testing.T) {
 		{"model", ModelTemplateOptions{ContextWindow: 1_000_000_001}},
 		{"model", ModelTemplateOptions{ReasoningEffort: "high\n"}},
 		{"model", ModelTemplateOptions{Template: "missing"}},
+		{"model", ModelTemplateOptions{NativeModel: "invalid\nmodel"}},
+		{"model", ModelTemplateOptions{Template: "template", NativeModel: "gpt-6.1-sol"}},
 		{"model", ModelTemplateOptions{Template: "template", ReasoningEffort: "high"}},
 	} {
 		if _, err := PrepareModelTemplate(home, cfg, tc.model, tc.opts); err == nil {
@@ -137,13 +142,13 @@ func TestPrepareTemplateRejectsOptionsWithoutWriting(t *testing.T) {
 			t.Fatal("invalid template setup changed disk state")
 		}
 	}
-	slug, err := PrepareModelTemplate(home, cfg, "new-reasoner", ModelTemplateOptions{ReasoningEffort: "high"})
+	slug, err := PrepareModelTemplate(home, cfg, "new-reasoner", ModelTemplateOptions{NativeModel: "gpt-6.1-sol", ReasoningEffort: "high"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	catalog, _ := TemplatesFrom(filepath.Join(home, "templates.json"))
 	item := findModelTemplate(catalog, slug)
-	if !templateSupportsEffort(item, "high") || item["default_reasoning_level"] != "high" || item["supports_reasoning_summaries"] != false {
+	if !templateSupportsEffort(item, "high") || item["default_reasoning_level"] != "high" || item["context_window"] != json.Number("272000") {
 		t.Fatal("explicit reasoning option enabled unrelated capabilities or was not retained")
 	}
 }
@@ -245,12 +250,12 @@ func TestModelTemplateNativeCatalog(t *testing.T) {
 		t.Skip("set CODEX_GATEWAY_TEST_CODEX_BIN for native catalog compatibility")
 	}
 	home, cfg := emptyModelSetupHome(t)
-	slug, err := PrepareModelTemplate(home, cfg, "native-generic-check", ModelTemplateOptions{})
+	slug, err := PrepareModelTemplate(home, cfg, "native-mapped-check", ModelTemplateOptions{NativeModel: "gpt-6.1-sol"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.Providers["test"] = Provider{BaseURL: "http://127.0.0.1:9/v1", Auth: "api_key", APIKeyEnv: "GATEWAY_MODEL_TEST_KEY"}
-	cfg.Models["test/generic"] = Model{Provider: "test", Model: "native-generic-check", Template: slug}
+	cfg.Models["test/native"] = Model{Provider: "test", Model: "native-mapped-check", NativeModel: "gpt-6.1-sol", Template: slug}
 	if err := SaveConfig(home, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +267,7 @@ func TestModelTemplateNativeCatalog(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	options := []string{
-		`model_provider="gateway_test"`, `model="test/generic"`,
+		`model_provider="gateway_test"`, `model="test/native"`,
 		`model_catalog_json=` + fmt.Sprintf("%q", filepath.Join(home, "models.json")),
 		`cli_auth_credentials_store="file"`,
 		`model_providers.gateway_test.name="Test"`,
@@ -330,7 +335,7 @@ func TestModelTemplateNativeCatalog(t *testing.T) {
 			t.Fatalf("native model list did not use generated metadata: %s", message.Result)
 		}
 		model := response.Data[0]
-		if model.ID != "test/generic" || !reflect.DeepEqual(model.InputModalities, []string{"text"}) || len(model.SupportedReasoning) != 0 || model.DefaultReasoningEffort != "none" {
+		if model.ID != "test/native" || !reflect.DeepEqual(model.InputModalities, []string{"text", "image"}) || len(model.SupportedReasoning) != 6 || model.DefaultReasoningEffort != "low" {
 			t.Fatalf("native model list capabilities changed: %s", message.Result)
 		}
 		return
