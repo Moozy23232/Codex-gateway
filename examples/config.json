@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 33989
+  },
+  "codex_home": "/home/your-user/.codex",
+  "client_auth": "token",
+  "default_model": "example/coding",
+  "bootstrap_proxy": null,
+  "retry_invalid_encrypted_reasoning": false,
+  "providers": {
+    "example": {
+      "base_url": "https://api.example.com/v1",
+      "auth": "api_key",
+      "api_key_env": "EXAMPLE_API_KEY"
+    }
+  },
+  "models": {
+    "example/coding": {
+      "provider": "example",
+      "model": "replace-with-provider-model-id",
+      "template": "replace-with-catalog-slug",
+      "display_name": "Example Coding"
+    }
+  }
+}
