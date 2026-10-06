@@ -159,8 +159,8 @@ func runCodexHistoryPicker(executable string, arguments, env []string) ([]string
 		_ = server.Close()
 		// The remote path is only a picker: do not run a session through it.
 		// Local native startup preserves cwd prompts, profiles and sandbox flags.
-		// Closing the picker RPC produces an expected native transport error;
-		// only suppress it after a confirmed selection, never on picker failure.
+		// The handoff RPC error makes native startup exit and restore its terminal.
+		// Only suppress that diagnostic after selection, never on picker failure.
 		return historySelectedArguments(arguments, id), 0, nil
 	default:
 		_, _ = io.Copy(os.Stderr, &diagnostics)
@@ -230,7 +230,8 @@ func bridgeNativeHistory(parent context.Context, connection *websocket.Conn, exe
 				}
 				if selected != nil {
 					var request struct {
-						Method string `json:"method"`
+						ID     json.RawMessage `json:"id"`
+						Method string          `json:"method"`
 						Params struct {
 							ThreadID string `json:"threadId"`
 						} `json:"params"`
@@ -239,14 +240,27 @@ func bridgeNativeHistory(parent context.Context, connection *websocket.Conn, exe
 						return err
 					}
 					if request.Method == "thread/resume" || request.Method == "thread/fork" || request.Method == "thread/start" {
-						if request.Method != "thread/start" && request.Params.ThreadID == "" {
-							return errors.New("missing selected thread ID")
+						if len(request.ID) == 0 || (request.Method != "thread/start" && request.Params.ThreadID == "") {
+							return errors.New("missing history selection request or thread ID")
+						}
+						response, err := json.Marshal(map[string]any{
+							"id":    request.ID,
+							"error": map[string]any{"code": -32000, "message": "local history handoff"},
+						})
+						if err != nil {
+							return err
 						}
 						select {
 						case selected <- request.Params.ThreadID:
 						case <-ctx.Done():
+							return ctx.Err()
 						}
-						return nil // Close the picker before any session is created or resumed.
+						// ponytail-lite: let native startup reject this RPC and clean up
+						// its own terminal. A disconnect instead leaves the TUI reconnecting.
+						if err := connection.Write(ctx, websocket.MessageText, response); err != nil {
+							return err
+						}
+						continue // Never create/resume a session on the picker backend.
 					}
 				}
 				data, err = allProviderHistoryRequest(data)

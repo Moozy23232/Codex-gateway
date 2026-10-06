@@ -99,44 +99,68 @@ func TestAllProviderHistoryRequest(t *testing.T) {
 	}
 }
 
-func TestHistoryBridgeSelectionDoesNotResumeBackend(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	selected := make(chan string, 1)
-	done := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer close(done)
-		connection, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer connection.CloseNow()
-		_ = bridgeNativeHistory(ctx, connection, "/bin/sh", []string{"-c", "while IFS= read -r line; do printf '%s\\n' \"$line\"; done"}, os.Environ(), selected)
-	}))
-	defer server.Close()
-	connection, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connection.CloseNow()
-	if err := connection.Write(ctx, websocket.MessageText, []byte(`{"id":3,"method":"thread/resume","params":{"threadId":"saved-id"}}`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := connection.Read(ctx); err == nil {
-		t.Fatal("resume was forwarded to remote backend")
-	}
-	select {
-	case id := <-selected:
-		if id != "saved-id" {
-			t.Fatal(id)
-		}
-	case <-ctx.Done():
-		t.Fatal("selection lost")
-	}
-	select {
-	case <-done:
-	case <-ctx.Done():
-		t.Fatal("picker backend still running")
+func TestHistoryBridgeSelectionRejectsRPCWithoutDisconnect(t *testing.T) {
+	for _, method := range []string{"thread/start", "thread/resume", "thread/fork"} {
+		t.Run(method, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			selected := make(chan string, 1)
+			done := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(done)
+				connection, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer connection.CloseNow()
+				_ = bridgeNativeHistory(ctx, connection, "/bin/sh", []string{"-c", "while IFS= read -r line; do printf '%s\\n' \"$line\"; done"}, os.Environ(), selected)
+			}))
+			defer server.Close()
+			connection, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.CloseNow()
+			id, thread := "9007199254740993", "saved-id"
+			if method == "thread/start" {
+				id, thread = `"new-thread"`, ""
+			}
+			request := `{"id":` + id + `,"method":"` + method + `","params":{"threadId":"` + thread + `"}}`
+			if err := connection.Write(ctx, websocket.MessageText, []byte(request)); err != nil {
+				t.Fatal(err)
+			}
+			_, data, err := connection.Read(ctx)
+			var reply struct {
+				ID    json.RawMessage    `json:"id"`
+				Error struct{ Code int } `json:"error"`
+			}
+			if err != nil || json.Unmarshal(data, &reply) != nil || string(reply.ID) != id || reply.Error.Code != -32000 {
+				t.Fatalf("selection must reject RPC, not forward or disconnect: %s, %v", data, err)
+			}
+			select {
+			case got := <-selected:
+				if got != thread {
+					t.Fatalf("selection = %q, want %q", got, thread)
+				}
+			case <-ctx.Done():
+				t.Fatal("selection lost")
+			}
+			// Startup can have other requests in flight, notably skills/list.
+			message := `{"id":4,"method":"skills/list","params":{}}`
+			if err := connection.Write(ctx, websocket.MessageText, []byte(message)); err != nil {
+				t.Fatal(err)
+			}
+			_, data, err = connection.Read(ctx)
+			if err != nil || string(data) != message {
+				t.Fatalf("transport closed before native cleanup: %s, %v", data, err)
+			}
+			connection.CloseNow()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("picker backend still running after native exit")
+			}
+		})
 	}
 }
 
