@@ -184,7 +184,7 @@ func TestWrapperOfficialOnlyRunsNativeWithoutHistoryRPC(t *testing.T) {
 	t.Setenv("CODEX_GATEWAY_WRAPPER_ACTIVE", "")
 	for _, test := range []struct {
 		args, want []string
-	}{{nil, []string{"-m", "fake-native-model"}}, {[]string{"resume", "--all"}, []string{"resume", "--all"}}, {[]string{"-m", "official/fake-model", "exec", "prompt"}, []string{"-m", "fake-native-model", "exec", "prompt"}}} {
+	}{{nil, []string{"-m", "fake-native-model"}}, {[]string{"resume", "--last"}, []string{"resume", "--last"}}, {[]string{"-m", "official/fake-model", "exec", "prompt"}, []string{"-m", "fake-native-model", "exec", "prompt"}}} {
 		var out, errOut bytes.Buffer
 		if code := executeWrapped(test.args, strings.NewReader(""), &out, &errOut); code != 0 || out.String() != strings.Join(test.want, "\n")+"\n" {
 			t.Fatalf("official-only = %d, stdout=%q, stderr=%s", code, out.String(), &errOut)
@@ -220,7 +220,7 @@ func TestWrapperCreatesNativeHomeOnlyForSessionOrLogin(t *testing.T) {
 			t.Fatal("read-only utility created a native home")
 		}
 	}
-	for _, args := range [][]string{nil, {"login"}} {
+	for _, args := range [][]string{nil, {"login"}, {"resume"}, {"fork"}} {
 		if code := executeWrapped(args, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
 			t.Fatal("native first-session/login launch failed")
 		}

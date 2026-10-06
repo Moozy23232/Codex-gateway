@@ -623,11 +623,15 @@ func RunCodex(home string, args []string, codexExecutable string) (int, error) {
 	if err := ensureNativeHome(cfg); err != nil {
 		return 1, err
 	}
+	if usesHistoryPicker(args) {
+		selected, code, err := runCodexHistoryPicker(executable, arguments, env)
+		if selected == nil || err != nil {
+			return code, err
+		}
+		arguments = selected
+	}
 	if _, err := Start(home); err != nil {
 		return 1, err
-	}
-	if usesHistoryPicker(args) {
-		return runCodexHistoryPicker(executable, arguments, env)
 	}
 	return runCodexChild(executable, arguments, env, os.Stdin, os.Stdout, os.Stderr)
 }

@@ -33,6 +33,7 @@ func newMixedWrapperFixture(t *testing.T) *lifecycleFixture {
 	t.Setenv("CODEX_GATEWAY_TOKEN", "")
 	t.Setenv("CODEX_GATEWAY_TEST_EXIT", "37")
 	t.Setenv("CODEX_GATEWAY_HOME", f.home)
+	t.Setenv("CODEX_HOME", f.cfg.CodexHome)
 	t.Setenv("CODEX_GATEWAY_CODEX_BIN", lifecycleFakeExecutable(t))
 	t.Setenv("CODEX_GATEWAY_NATIVE_CODEX_BIN", os.Getenv("CODEX_GATEWAY_CODEX_BIN"))
 	t.Setenv("CODEX_GATEWAY_TEST_RECORD", filepath.Join(f.home, "launch.json"))
@@ -61,9 +62,9 @@ func checkMixedWrapperLaunch(t *testing.T, f *lifecycleFixture, args []string, w
 	if err := readJSON(filepath.Join(f.home, "launch.json"), &observed, true); err != nil {
 		t.Fatal(err)
 	}
-	if gateway && usesHistoryPicker(args) {
-		wantModel = ""
-	} // Selection only; model options are replayed after choosing.
+	if usesHistoryPicker(args) {
+		wantModel, gateway = "", false
+	} // Selection only; routes and models are resolved after choosing.
 	if got := selectedWrappedModel(observed.Args); got != wantModel {
 		t.Errorf("selected model = %q, want %q; args=%q", got, wantModel, observed.Args)
 	}
@@ -122,7 +123,7 @@ func checkMixedWrapperLaunch(t *testing.T, f *lifecycleFixture, args []string, w
 		}
 	}
 	command, _ := wrappedCommand(args)
-	if gateway && usesHistoryPicker(args) {
+	if usesHistoryPicker(args) {
 		cwd, _ := os.Getwd()
 		if len(observed.Args) < 4 || observed.Args[0] != "-C" || observed.Args[1] != cwd || observed.Args[2] != "--remote" || !strings.HasPrefix(observed.Args[3], "unix://") {
 			t.Fatalf("missing local native history bridge: %q", observed.Args)
@@ -130,7 +131,10 @@ func checkMixedWrapperLaunch(t *testing.T, f *lifecycleFixture, args []string, w
 		if _, err := os.Stat(strings.TrimPrefix(observed.Args[3], "unix://")); !os.IsNotExist(err) {
 			t.Errorf("history bridge socket was not cleaned up: %v", err)
 		}
-		want := []string{command, "--all"}
+		want := []string{command}
+		if nativeHasFlag(args, "--all") {
+			want = append(want, "--all")
+		}
 		if command == "resume" {
 			want = append(want, "--include-non-interactive")
 		}
@@ -148,6 +152,7 @@ func TestWrapperMixedModelLaunches(t *testing.T) {
 		model        string
 		gateway      bool
 		officialOnly bool
+		unconfigured bool
 		wantNative   []string
 	}{
 		{name: "official alias", args: []string{"-m", "official/model", "exec", "prompt"}, model: "official/model", gateway: true},
@@ -165,6 +170,12 @@ func TestWrapperMixedModelLaunches(t *testing.T) {
 		{name: "official only alias", args: []string{"-m", "official/model", "exec", "prompt"}, model: "official-upstream", officialOnly: true, wantNative: []string{"-m", "official-upstream", "exec", "prompt"}},
 		{name: "official only default", model: "official-upstream", officialOnly: true, wantNative: []string{"-m", "official-upstream"}},
 		{name: "official only resume", args: []string{"resume", "--all"}, officialOnly: true},
+		{name: "unconfigured resume", args: []string{"resume"}, unconfigured: true},
+		{name: "unconfigured resume all", args: []string{"resume", "--all"}, unconfigured: true},
+		{name: "unconfigured fork", args: []string{"fork"}, unconfigured: true},
+		{name: "unconfigured explicit model picker", args: []string{"resume", "-m", "external-model"}, unconfigured: true},
+		{name: "configured unknown model picker", args: []string{"resume", "-m", "external-model"}},
+		{name: "official only fork", args: []string{"fork"}, officialOnly: true},
 		{name: "native resume picker", args: []string{"resume"}, model: "official/model", gateway: true},
 		{name: "native resume all", args: []string{"resume", "--all"}, model: "official/model", gateway: true},
 		{name: "native resume last", args: []string{"resume", "--last"}, model: "official/model", gateway: true},
@@ -183,6 +194,16 @@ func TestWrapperMixedModelLaunches(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if test.unconfigured {
+				t.Cleanup(func() {
+					if err := SaveConfig(f.home, f.cfg); err != nil {
+						t.Error(err)
+					}
+				})
+				if err := os.Remove(filepath.Join(f.home, "config.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			got := checkMixedWrapperLaunch(t, f, test.args, test.model, test.gateway)
 			if test.gateway && wrappedResumeIndex(test.args) >= 0 && !usesHistoryPicker(test.args) {
 				_, remaining, _ := lifecycleConfigArguments(got)
@@ -191,7 +212,7 @@ func TestWrapperMixedModelLaunches(t *testing.T) {
 					t.Errorf("native resume arguments changed: %q, want %q", remaining, want)
 				}
 			}
-			if !test.gateway {
+			if !test.gateway && !usesHistoryPicker(test.args) {
 				want := test.wantNative
 				if want == nil {
 					want = test.args

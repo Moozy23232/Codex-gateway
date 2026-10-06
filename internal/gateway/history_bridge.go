@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -59,28 +60,40 @@ func usesHistoryPicker(args []string) bool {
 		!nativeHasFlag(args, "--last") && len(nativePositionals(args, index+1)) == 0
 }
 
+func historyProviderArguments() []string {
+	return []string{"-c", `model_provider="codex-gateway-history"`,
+		"-c", `model_providers.codex-gateway-history.name="Codex history reader"`,
+		"-c", `model_providers.codex-gateway-history.base_url="http://127.0.0.1:9/v1"`,
+		"-c", `model_providers.codex-gateway-history.env_key="CODEX_GATEWAY_HISTORY_TOKEN"`,
+		"-c", `model_providers.codex-gateway-history.wire_api="responses"`,
+		"-c", `model_providers.codex-gateway-history.requires_openai_auth=false`}
+}
+
 // Keep the actual native picker, including search, paging and previews.
 // The private Unix socket only bridges its WebSocket RPC to a native stdio server;
 // it never edits rollout files, the history database, or provider metadata.
-func runCodexHistoryPicker(executable string, arguments, env []string) (int, error) {
+// A non-nil selection is replayed by the caller through its normal launch path.
+func runCodexHistoryPicker(executable string, arguments, env []string) ([]string, int, error) {
 	overrides, _, err := lifecycleConfigArguments(arguments)
 	if err != nil {
-		return 1, err
+		return nil, 1, err
 	}
 	var backendArgs []string
 	for _, override := range overrides {
 		backendArgs = append(backendArgs, "-c", override)
 	}
+	backendArgs = append(backendArgs, historyProviderArguments()...)
 	backendArgs = append(backendArgs, "app-server", "--listen", "stdio://")
+	backendEnv := replaceEnvironment(env, "CODEX_GATEWAY_HISTORY_TOKEN", "local-history-only")
 	directory, err := os.MkdirTemp("", "cg-history-")
 	if err != nil {
-		return 1, err
+		return nil, 1, err
 	}
 	defer os.RemoveAll(directory)
 	path := filepath.Join(directory, "rpc.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
-		return 1, err
+		return nil, 1, err
 	}
 	selected := make(chan string, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -93,7 +106,7 @@ func runCodexHistoryPicker(executable string, arguments, env []string) (int, err
 			return
 		}
 		defer connection.CloseNow()
-		if err := bridgeNativeHistory(ctx, connection, executable, backendArgs, env, selected); err != nil && ctx.Err() == nil {
+		if err := bridgeNativeHistory(ctx, connection, executable, backendArgs, backendEnv, selected); err != nil && ctx.Err() == nil {
 			// Do not put requests, history contents or native stderr in diagnostics.
 			_ = connection.Close(websocket.StatusInternalError, "native Codex history connection ended")
 		}
@@ -111,11 +124,27 @@ func runCodexHistoryPicker(executable string, arguments, env []string) (int, err
 	command, _ := wrappedCommand(arguments)
 	cwd, err := os.Getwd()
 	if err != nil {
-		return 1, err
+		return nil, 1, err
 	}
-	// This cwd applies only to the remote picker (including tui.resume_cwd=current),
-	// never to the local session launched after selection.
-	args := []string{"-C", cwd, "--remote", "unix://" + path, command, "--all"}
+	for i := 0; i < len(arguments) && arguments[i] != "--"; i++ {
+		arg := arguments[i]
+		if nativeValueOptions[arg] {
+			if (arg == "-C" || arg == "--cd") && i+1 < len(arguments) {
+				cwd = arguments[i+1]
+			}
+			i++
+		} else if strings.HasPrefix(arg, "--cd=") {
+			cwd = strings.TrimPrefix(arg, "--cd=")
+		} else if strings.HasPrefix(arg, "-C") {
+			cwd = strings.TrimPrefix(strings.TrimPrefix(arg, "-C"), "=")
+		}
+	}
+	// Only the remote picker receives this cwd; the selected session keeps the
+	// original CLI arguments and native directory prompt.
+	args := []string{"-C", cwd, "--remote", "unix://" + path, command}
+	if nativeHasFlag(arguments, "--all") {
+		args = append(args, "--all")
+	}
 	if command == "resume" {
 		args = append(args, "--include-non-interactive")
 	}
@@ -132,10 +161,10 @@ func runCodexHistoryPicker(executable string, arguments, env []string) (int, err
 		// Local native startup preserves cwd prompts, profiles and sandbox flags.
 		// Closing the picker RPC produces an expected native transport error;
 		// only suppress it after a confirmed selection, never on picker failure.
-		return runCodexChild(executable, historySelectedArguments(arguments, id), env, os.Stdin, os.Stdout, os.Stderr)
+		return historySelectedArguments(arguments, id), 0, nil
 	default:
 		_, _ = io.Copy(os.Stderr, &diagnostics)
-		return code, runErr
+		return nil, code, runErr
 	}
 }
 

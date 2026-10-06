@@ -5,6 +5,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,6 +33,33 @@ func TestHistoryPickerScopeAndSafety(t *testing.T) {
 		if got := historySelectedArguments(args, "saved-id"); !reflect.DeepEqual(got, want) {
 			t.Fatalf("native permission/profile args changed: %q, want %q", got, want)
 		}
+	}
+}
+
+func TestHistoryPickerHonorsCD(t *testing.T) {
+	for _, option := range []string{"-C", "--cd", "-C=", "--cd=", "-Cattached"} {
+		t.Run(option, func(t *testing.T) {
+			f := newMixedWrapperFixture(t)
+			args := []string{option, f.home, "resume"}
+			if strings.HasSuffix(option, "=") {
+				args = []string{option + f.home, "resume"}
+			} else if option == "-Cattached" {
+				args = []string{"-C" + f.home, "resume"}
+			}
+			if code := executeWrapped(args, nil, io.Discard, io.Discard); code != 37 {
+				t.Fatalf("picker exit = %d", code)
+			}
+			var observed struct {
+				Args []string          `json:"args"`
+				Env  map[string]string `json:"env"`
+			}
+			if err := readJSON(os.Getenv("CODEX_GATEWAY_TEST_RECORD"), &observed, true); err != nil {
+				t.Fatal(err)
+			}
+			if len(observed.Args) < 2 || observed.Args[0] != "-C" || observed.Args[1] != f.home {
+				t.Fatalf("picker cwd lost: %q", observed.Args)
+			}
+		})
 	}
 }
 

@@ -462,7 +462,8 @@ func loadWrappedConfig(home string) (*Config, error) {
 
 // ExecuteWrapped is the installed codex entry. Native utility commands keep
 // their original arguments and launcher; only configured model sessions need
-// gateway startup and process-local provider settings.
+// gateway startup and process-local provider settings. History selection is
+// independent of that configuration and finishes before any route is prepared.
 func ExecuteWrapped(args []string, out, errOut io.Writer) int {
 	return executeWrapped(args, os.Stdin, out, errOut)
 }
@@ -489,6 +490,24 @@ func executeWrapped(args []string, in io.Reader, out, errOut io.Writer) int {
 	if configErr != nil && !plain {
 		fmt.Fprintln(errOut, "error:", configErr)
 		return 1
+	}
+	if usesHistoryPicker(args) {
+		env := os.Environ()
+		if cfg != nil {
+			if err := ensureNativeHome(cfg); err != nil {
+				fmt.Fprintln(errOut, "error:", err)
+				return 1
+			}
+			env = replaceEnvironment(env, "CODEX_HOME", cfg.CodexHome)
+		}
+		selected, code, err := runCodexHistoryPicker(executable, args, env)
+		if err != nil {
+			fmt.Fprintln(errOut, "error:", err)
+		}
+		if selected == nil {
+			return code
+		}
+		return executeWrapped(selected, in, out, errOut)
 	}
 	if cfg == nil || !hasThirdPartyModels(cfg) {
 		plain = true
@@ -592,13 +611,7 @@ func wrapperHistoryRPC(parent context.Context, cfg *Config, method string, param
 	if err != nil {
 		return err
 	}
-	settings := []string{`model_provider="codex-gateway-history"`, `model_providers.codex-gateway-history.name="Codex history reader"`,
-		`model_providers.codex-gateway-history.base_url="http://127.0.0.1:9/v1"`, `model_providers.codex-gateway-history.env_key="CODEX_GATEWAY_HISTORY_TOKEN"`,
-		`model_providers.codex-gateway-history.wire_api="responses"`, `model_providers.codex-gateway-history.requires_openai_auth=false`}
-	args := []string{}
-	for _, setting := range settings {
-		args = append(args, "-c", setting)
-	}
+	args := historyProviderArguments()
 	command := exec.CommandContext(ctx, executable, append(args, "app-server")...)
 	command.Env = replaceEnvironment(replaceEnvironment(os.Environ(), "CODEX_HOME", cfg.CodexHome), "CODEX_GATEWAY_HISTORY_TOKEN", "local-history-only")
 	command.Dir = cfg.CodexHome
