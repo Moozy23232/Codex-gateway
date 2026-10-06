@@ -3,12 +3,10 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -235,64 +233,28 @@ func TestWrapperCreatesNativeHomeOnlyForSessionOrLogin(t *testing.T) {
 	}
 }
 
-func historyResult(result, value any) error {
-	data, _ := json.Marshal(value)
-	return json.Unmarshal(data, result)
-}
-
-func TestWrapperResumeListsEveryProviderAndPreservesNativeID(t *testing.T) {
-	cfg := &Config{Models: map[string]Model{"custom/model": {Provider: "custom"}}, Providers: map[string]Provider{"custom": {Auth: "api_key"}}}
-	sessions := []wrappedSession{{ID: "old-official", ModelProvider: "openai", Model: "native-model", Preview: "old official conversation"}, {ID: "old-custom", ModelProvider: "openai", Model: "custom/model", Preview: "old gateway conversation\x1b[31m"}}
-	var out bytes.Buffer
-	rpc := func(_ context.Context, _ *Config, method string, params, result any) error {
-		if method != "thread/list" {
-			t.Fatalf("unexpected method %s", method)
+func TestWrapperResumeLeavesNativeSelection(t *testing.T) {
+	rpc := func(context.Context, *Config, string, any, any) error {
+		t.Fatal("native picker/--last must not query history in the wrapper")
+		return nil
+	}
+	for _, args := range [][]string{
+		{"resume"}, {"resume", "--all"}, {"resume", "--last"},
+		{"fork"}, {"fork", "--last"},
+		{"exec", "resume"}, {"exec", "resume", "--last", "--json", "-"},
+		{"e", "resume", "--last", "--all", "prompt"},
+	} {
+		if session := readWrappedResume(args, &Config{}, rpc); session != nil {
+			t.Fatalf("wrapper selected a session for %q: %#v", args, session)
 		}
-		p := params.(map[string]any)
-		if providers, ok := p["modelProviders"].([]string); !ok || len(providers) != 0 {
-			t.Fatal("resume query was restricted to the gateway provider")
-		}
-		if _, ok := p["cwd"]; ok {
-			t.Fatal("--all did not remove directory filtering")
-		}
-		return historyResult(result, map[string]any{"data": sessions})
-	}
-	args, session, err := prepareWrappedResume([]string{"resume", "--all"}, cfg, strings.NewReader("2\n"), &out, rpc)
-	if err != nil || !reflect.DeepEqual(args, []string{"resume", "old-custom", "--all"}) || session == nil || !sessionUsesGateway(*session, cfg) {
-		t.Fatalf("cross-provider selection = %q, %#v, %v", args, session, err)
-	}
-	if !strings.Contains(out.String(), "old official conversation") || strings.Contains(out.String(), "\x1b") {
-		t.Fatal("history menu omitted native sessions or emitted terminal control characters")
-	}
-	if sessionUsesGateway(sessions[0], cfg) {
-		t.Fatal("official history would have been forced through the gateway")
-	}
-}
-
-func TestWrapperResumeLastDoesNotConsumeExecPrompt(t *testing.T) {
-	cfg := &Config{}
-	input := strings.NewReader("original prompt from stdin")
-	rpc := func(_ context.Context, _ *Config, method string, params, result any) error {
-		p := params.(map[string]any)
-		if _, ok := p["cwd"]; !ok || p["sourceKinds"] == nil {
-			t.Fatal("exec resume directory or noninteractive history filtering missing")
-		}
-		return historyResult(result, map[string]any{"data": []wrappedSession{{ID: "selected-uuid", ModelProvider: "codex-gateway"}}})
-	}
-	args, _, err := prepareWrappedResume([]string{"exec", "resume", "--last", "--json", "-"}, cfg, input, io.Discard, rpc)
-	if err != nil || !reflect.DeepEqual(args, []string{"exec", "resume", "selected-uuid", "--json", "-"}) {
-		t.Fatalf("exec resume arguments = %q, %v", args, err)
-	}
-	if input.Len() != len("original prompt from stdin") {
-		t.Fatal("--last consumed exec prompt stdin")
 	}
 }
 
 func TestWrapperExplicitResumeLeavesNativeNameResolution(t *testing.T) {
 	original := []string{"resume", "saved-name"}
 	rpc := func(context.Context, *Config, string, any, any) error { return errors.New("native resolves names") }
-	args, session, err := prepareWrappedResume(original, &Config{}, strings.NewReader(""), io.Discard, rpc)
-	if err != nil || !reflect.DeepEqual(args, original) || session == nil || session.ID != "saved-name" {
-		t.Fatalf("explicit resume changed: %q, %#v, %v", args, session, err)
+	session := readWrappedResume(original, &Config{}, rpc)
+	if session == nil || session.ID != "saved-name" {
+		t.Fatalf("explicit resume changed: %#v", session)
 	}
 }

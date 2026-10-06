@@ -626,6 +626,9 @@ func RunCodex(home string, args []string, codexExecutable string) (int, error) {
 	if _, err := Start(home); err != nil {
 		return 1, err
 	}
+	if usesHistoryPicker(args) {
+		return runCodexHistoryPicker(executable, arguments, env)
+	}
 	return runCodexChild(executable, arguments, env, os.Stdin, os.Stdout, os.Stderr)
 }
 

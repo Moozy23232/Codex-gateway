@@ -2,7 +2,7 @@
 
 给原生 Codex CLI 添加多个 GPT 供应商。配置一次，日常继续使用 `codex`、`codex resume` 和 `codex exec`，在 `/model` 中选择模型。
 
-使用 Go 构建为单个可执行文件，使用者不需要安装 Go 或 Python。支持 Linux/macOS 的 amd64、arm64；仍需要原生 Codex CLI。当前对接并验证 Codex 0.159.2。
+使用 Go 构建为单个可执行文件，使用者不需要安装 Go 或 Python。支持 Linux/macOS 的 amd64、arm64；仍需要原生 Codex CLI。当前对接并验证 Codex 0.160.1。
 
 ## 安装
 
@@ -23,6 +23,14 @@ curl -fsSL https://github.com/Moozy23232/Codex-gateway/releases/latest/download/
 
 也支持 `CODEX_GATEWAY_INSTALL_DIR`。所选目录需要在 `PATH` 中排在其他 Codex 安装目录之前，才能直接使用包装后的 `codex`；安装器会给出提示，不自动修改 shell 配置或使用 sudo。尚未安装原生 Codex 时也能安装网关，实际运行前需先安装原生客户端。
 
+如果 `codex` 仍指向 npm 原版，把下面这一行放到 `~/.zshrc`（Bash 则为 `~/.bashrc`）中 **nvm 等环境初始化之后**，然后重新打开终端或执行 `source ~/.zshrc`：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+用 `command -v codex` 确认输出为 `~/.local/bin/codex` 对应的绝对路径。自定义安装目录时替换上面的目录；原生 Codex 不会被覆盖，仍可通过原安装路径直接启动。
+
 安装脚本校验 SHA-256，`--version` 或 `CODEX_GATEWAY_VERSION` 可以选择已发布版本。重复执行安装命令即可升级；下载、校验或安装失败时保留原有安装。
 
 ## 官方订阅
@@ -38,6 +46,8 @@ codex resume
 官方模型跟随账号自动加载，**不需要逐个执行 `add-model`**。只有官方模型时直接运行原生 Codex，不启动网关转发服务。
 
 也可执行 `codex-gateway add-provider --official`：它会调用或复用原生 ChatGPT 登录，自动同步官方模型及默认项。已有官方登录、随后添加第三方供应商时，包装入口会自动识别该登录，并把官方模型加入选择列表。
+
+**混合配置统一入口**：配置了第三方模型后，已注册的官方和第三方模型都通过同一个本地网关。无论启动时选择官方还是第三方，都能在 `/model` 中切换已配置模型（部分版本放在 **All models** 下），无需退出重开来切换供应商。官方模型仍按账号可用列表同步，不会把第三方模型的额度或权限当作官方权限。
 
 混合使用官方与第三方时，官方认证由原生 Codex 管理，网关不自行实现 OAuth 刷新。桥接需要原生文件凭据；只保存在 keyring 时，可通过 `add-provider --official` 完成原生文件模式登录。需要地区专属后端的工作空间请直接使用原生入口。
 
@@ -90,7 +100,9 @@ codex-gateway status
 codex-gateway stop
 ```
 
-包装入口保留所选 Codex home 及已有会话。原生 Codex 会按供应商过滤恢复列表，因此混合会话恢复时可能先显示一个跨供应商的编号选择列表，再交给原生 Codex 恢复；显式指定会话 ID 可以直接恢复。不会迁移或改写已有会话来改变它们的归属。
+`codex resume` / `codex fork` 使用原生选择界面。混合配置下，列表跨供应商、跨目录显示旧会话，`resume` 也包含 `exec` 创建的记录；归档记录仍通过原生状态筛选查看。选择后交回本地原生 Codex，保留目录确认、profile、沙箱和审批参数；不会迁移或批量改写历史。显式会话 ID/名称和 `--last` 保持原生启动路径，`--last` 仍按原生 provider 规则选择。
+
+Codex 0.160.1 在命令行覆盖 provider 时会采用当前模型配置，因此从列表恢复使用当前网关默认模型；可用 `-m` / `-c model=...` 指定，或进入后用 `/model` 切换。显式指定旧会话时会匹配已注册路由，无法识别的模型仍交给原生 Codex。跨供应商的加密推理历史不保证兼容，遇到此类错误请参考[兼容说明](docs/advanced.md#跨供应商会话兼容)或新开会话。
 
 官方列表会自动同步并保留缓存；短暂离线时保留已有模型。新增模型或修改配置后，重新打开 Codex 即可加载更新。网关在空闲时重启应用配置；已有请求正在执行时不会强行中断。原生客户端升级、供应商模型升级或跨供应商恢复仍可能需要兼容性适配。
 

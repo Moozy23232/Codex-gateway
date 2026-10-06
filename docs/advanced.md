@@ -97,6 +97,14 @@ Running without the shared background server: command-line configuration overrid
 
 ## 跨供应商会话兼容
 
+混合配置下，包装入口把已注册的官方与第三方模型放在同一个 `model_provider` 和模型目录中，由网关按模型别名选择上游。`/model` 只切换模型，不切换客户端连接；这也适用于通过 `-m` 选择官方模型和恢复已注册官方模型的会话。仅官方配置继续原生直连；未知模型保留原生处理，不会被强制发送给第三方。
+
+每个供应商独立配置代理。如果第三方可用而官方模型未出现在菜单，检查官方登录和官方供应商的网络设置；例如需要代理时执行 `codex-gateway add-provider official --official --proxy http://127.0.0.1:7890 --replace`（替换为自己的供应商名称及代理地址），再重开 Codex。命令复用原生登录并尝试同步模型，不要仅为了显示菜单手工声明账号不可用的官方模型。
+
+### 原生历史列表
+
+混合配置的 `codex resume` / `codex fork` 通过私有 Unix socket 使用原生选择器，只把 `thread/list` 的 `modelProviders` 改为空数组，并取消目录过滤。`resume` 额外包含非交互会话；搜索、分页、预览和归档筛选仍由原生界面处理。选中后关闭临时连接，再以会话 ID 启动本地原生 Codex；真正的会话不走 remote 模式，避免改变目录确认和权限参数。退出或取消时回收临时进程与 socket，不迁移历史、不重写 provider 元数据。此路径已在 Codex 0.160.1 验证，依赖其 app-server 协议，原生版本升级时需要回归检查。仅官方配置、未知模型、显式会话 ID/名称和 `--last` 仍走原生路径。
+
 不同供应商可能无法读取彼此生成的加密 reasoning。默认保留原始请求并返回上游错误，不猜测未知失败原因。
 
 对于上游明确返回的 `invalid_encrypted_content`，提供默认关闭的兼容开关：

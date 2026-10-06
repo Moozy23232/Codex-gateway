@@ -13,10 +13,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -518,33 +516,22 @@ func executeWrapped(args []string, in io.Reader, out, errOut io.Writer) int {
 			}
 		}
 	}
-	var session *wrappedSession
 	if cfg != nil && !plain {
-		args, session, err = prepareWrappedResume(args, cfg, in, errOut, wrapperHistoryRPC)
-		if errors.Is(err, errResumeCanceled) {
-			return 0
-		}
-		if err != nil {
-			fmt.Fprintln(errOut, "error:", err)
-			return 1
-		}
-		if session != nil {
-			plain = !sessionUsesGateway(*session, cfg)
-			if selectedWrappedModel(args) == "" {
-				if route, exists := cfg.Models[session.Model]; exists {
-					model := session.Model
-					if cfg.Providers[route.Provider].Auth == "codex" {
-						model = route.Model
-					}
-					args = append([]string{"-m", model}, args...)
-				}
+		if session := readWrappedResume(args, cfg, wrapperHistoryRPC); session != nil {
+			model := wrappedSessionModel(*session, cfg)
+			plain = model == ""
+			if selectedWrappedModel(args) == "" && model != "" {
+				args = append([]string{"-m", model}, args...)
 			}
 		}
 	}
 	if cfg != nil && !utility && hasThirdPartyModels(cfg) {
 		if model := selectedWrappedModel(args); model != "" {
-			route, ok := cfg.Models[model]
-			plain = !ok || cfg.Providers[route.Provider].Auth == "codex"
+			// A mixed session keeps one provider and the full catalog, even when
+			// starting on an official model. /model changes the route, not the
+			// native provider. Unknown models still belong to native Codex.
+			_, ok := cfg.Models[model]
+			plain = !ok
 		}
 	}
 	if !plain {
@@ -565,7 +552,7 @@ func executeWrapped(args []string, in io.Reader, out, errOut io.Writer) int {
 		env = replaceEnvironment(env, "CODEX_HOME", cfg.CodexHome)
 		if !utility {
 			args = officialModelArgs(args, cfg)
-			if resumeIndex, _ := wrappedResumeIndex(args); resumeIndex < 0 && selectedWrappedModel(args) == "" {
+			if resumeIndex := wrappedResumeIndex(args); resumeIndex < 0 && selectedWrappedModel(args) == "" {
 				if route, ok := cfg.Models[cfg.DefaultModel]; ok && cfg.Providers[route.Provider].Auth == "codex" {
 					args = append([]string{"-m", route.Model}, args...)
 				}
@@ -589,9 +576,6 @@ type wrappedSession struct {
 	Model         string `json:"model"`
 	ModelProvider string `json:"modelProvider"`
 	Name          string `json:"name"`
-	Preview       string `json:"preview"`
-	Cwd           string `json:"cwd"`
-	UpdatedAt     int64  `json:"updatedAt"`
 }
 
 type wrappedHistoryRPC func(context.Context, *Config, string, any, any) error
@@ -622,8 +606,6 @@ func wrapperHistoryRPC(parent context.Context, cfg *Config, method string, param
 	return runNativeCodexRPC(ctx, command, method, params, result)
 }
 
-var errResumeCanceled = errors.New("resume selection canceled")
-
 func nativeHasFlag(args []string, flag string) bool {
 	for _, arg := range args {
 		if arg == "--" {
@@ -636,182 +618,76 @@ func nativeHasFlag(args []string, flag string) bool {
 	return false
 }
 
-func wrappedResumeIndex(args []string) (int, bool) {
+func wrappedResumeIndex(args []string) int {
 	command, index := wrappedCommand(args)
 	if command == "resume" || command == "fork" {
-		return index, false
+		return index
 	}
 	if command == "exec" || command == "e" {
 		positions := nativePositionals(args, index+1)
 		if len(positions) > 0 && args[positions[0]] == "resume" {
-			return positions[0], true
+			return positions[0]
 		}
 	}
-	return -1, false
+	return -1
 }
 
-func wrappedResumeCwd(args []string) (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		if (arg == "-C" || arg == "--cd") && i+1 < len(args) {
-			i++
-			cwd = args[i]
-		} else if strings.HasPrefix(arg, "--cd=") {
-			cwd = strings.TrimPrefix(arg, "--cd=")
-		} else if strings.HasPrefix(arg, "-C") && arg != "-C" {
-			cwd = strings.TrimPrefix(strings.TrimPrefix(arg, "-C"), "=")
-		}
-	}
-	cwd, err = filepath.Abs(cwd)
-	if err != nil {
-		return "", err
-	}
-	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
-		cwd = resolved
-	}
-	return cwd, nil
-}
-
-func historyLabel(text string) string {
-	text = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, text)
-	runes := []rune(strings.TrimSpace(text))
-	if len(runes) > 90 {
-		return string(runes[:90]) + "…"
-	}
-	return string(runes)
-}
-
-// Native resume --all only removes its directory filter, not its provider
-// filter. This small selector asks native Codex for all providers and then
-// hands an explicit ID back to the native resume/fork implementation.
-func prepareWrappedResume(args []string, cfg *Config, in io.Reader, out io.Writer, rpc wrappedHistoryRPC) ([]string, *wrappedSession, error) {
-	index, noninteractive := wrappedResumeIndex(args)
-	if index < 0 {
-		return args, nil, nil
+// ponytail-lite: native Codex owns the picker and --last. Only explicit
+// IDs/names need a metadata lookup to route older, cross-provider sessions.
+func readWrappedResume(args []string, cfg *Config, rpc wrappedHistoryRPC) *wrappedSession {
+	index := wrappedResumeIndex(args)
+	if index < 0 || nativeHasFlag(args[index+1:], "--last") {
+		return nil
 	}
 	positions := nativePositionals(args, index+1)
-	last := nativeHasFlag(args[index+1:], "--last")
-	if len(positions) > 0 && !last {
-		var result struct {
-			Thread wrappedSession `json:"thread"`
+	if len(positions) == 0 {
+		return nil
+	}
+	var result struct {
+		Thread wrappedSession `json:"thread"`
+	}
+	if err := rpc(context.Background(), cfg, "thread/read", map[string]any{"threadId": args[positions[0]], "includeTurns": false}, &result); err != nil {
+		var listed struct {
+			Data []wrappedSession `json:"data"`
 		}
-		if err := rpc(context.Background(), cfg, "thread/read", map[string]any{"threadId": args[positions[0]], "includeTurns": false}, &result); err != nil {
-			var listed struct {
-				Data []wrappedSession `json:"data"`
-			}
-			if err := rpc(context.Background(), cfg, "thread/list", map[string]any{"modelProviders": []string{}, "searchTerm": args[positions[0]], "limit": 100, "sourceKinds": []string{"cli", "vscode", "exec", "appServer"}}, &listed); err == nil {
-				var matches []wrappedSession
-				for _, session := range listed.Data {
-					if session.Name == args[positions[0]] {
-						matches = append(matches, session)
-					}
-				}
-				if len(matches) == 1 {
-					return args, &matches[0], nil
+		if err := rpc(context.Background(), cfg, "thread/list", map[string]any{"modelProviders": []string{}, "searchTerm": args[positions[0]], "limit": 100, "sourceKinds": []string{"cli", "vscode", "exec", "appServer"}}, &listed); err == nil {
+			var matches []wrappedSession
+			for _, session := range listed.Data {
+				if session.Name == args[positions[0]] {
+					matches = append(matches, session)
 				}
 			}
-			// Native Codex still owns name resolution and error handling for an
-			// explicit session. A missing metadata match must not hide it.
-			return args, &wrappedSession{ID: args[positions[0]]}, nil
+			if len(matches) == 1 {
+				return &matches[0]
+			}
 		}
-		return args, &result.Thread, nil
+		// Native Codex still owns name resolution and error handling.
+		return &wrappedSession{ID: args[positions[0]]}
 	}
-	if noninteractive && !last {
-		return args, nil, nil // Preserve native validation; never consume an exec prompt.
-	}
-	params := map[string]any{"modelProviders": []string{}, "limit": 20, "sortKey": "updated_at", "sortDirection": "desc"}
-	if !nativeHasFlag(args[index+1:], "--all") {
-		cwd, err := wrappedResumeCwd(args)
-		if err != nil {
-			return nil, nil, errors.New("cannot determine the resume directory")
-		}
-		params["cwd"] = cwd
-	}
-	if noninteractive || nativeHasFlag(args[index+1:], "--include-non-interactive") {
-		params["sourceKinds"] = []string{"cli", "vscode", "exec", "appServer"}
-	}
-	for page := 0; page < 100; page++ {
-		var result struct {
-			Data       []wrappedSession `json:"data"`
-			NextCursor string           `json:"nextCursor"`
-		}
-		if err := rpc(context.Background(), cfg, "thread/list", params, &result); err != nil {
-			return nil, nil, fmt.Errorf("cannot list saved Codex sessions; retry or use an explicit session ID: %w", err)
-		}
-		if len(result.Data) == 0 {
-			return nil, nil, errors.New("no saved Codex sessions found; use --all to include other directories")
-		}
-		choice := 0
-		if !last {
-			action := "Resume"
-			if args[index] == "fork" {
-				action = "Fork"
-			}
-			fmt.Fprintf(out, "%s a saved Codex session (all providers):\n", action)
-			for i, session := range result.Data {
-				label := session.Name
-				if label == "" {
-					label = session.Preview
-				}
-				fmt.Fprintf(out, "  %d. %s  [%s] %s", i+1, time.Unix(session.UpdatedAt, 0).Local().Format("2006-01-02 15:04"), historyLabel(session.ModelProvider), historyLabel(label))
-				if nativeHasFlag(args[index+1:], "--all") {
-					fmt.Fprintf(out, "  %s", historyLabel(session.Cwd))
-				}
-				fmt.Fprintln(out)
-			}
-			fmt.Fprint(out, "Session number (q to cancel")
-			if result.NextCursor != "" {
-				fmt.Fprint(out, ", n for more")
-			}
-			fmt.Fprint(out, "): ")
-			line, err := readSetupLine(in)
-			if errors.Is(err, io.EOF) || strings.EqualFold(strings.TrimSpace(line), "q") {
-				return nil, nil, errResumeCanceled
-			}
-			if err != nil {
-				return nil, nil, err
-			}
-			if strings.EqualFold(strings.TrimSpace(line), "n") && result.NextCursor != "" {
-				params["cursor"] = result.NextCursor
-				continue
-			}
-			number, err := strconv.Atoi(strings.TrimSpace(line))
-			if err != nil || number < 1 || number > len(result.Data) {
-				return nil, nil, errors.New("select a session number from the list")
-			}
-			choice = number - 1
-		}
-		selected := result.Data[choice]
-		if selected.ID == "" {
-			return nil, nil, errors.New("native Codex returned a session without an ID")
-		}
-		updated := append([]string(nil), args[:index+1]...)
-		updated = append(updated, selected.ID)
-		for _, arg := range args[index+1:] {
-			if arg != "--last" {
-				updated = append(updated, arg)
-			}
-		}
-		return updated, &selected, nil
-	}
-	return nil, nil, errors.New("too many saved session pages; resume using an explicit session ID")
+	return &result.Thread
 }
 
-func sessionUsesGateway(session wrappedSession, cfg *Config) bool {
-	if route, ok := cfg.Models[session.Model]; ok {
-		return cfg.Providers[route.Provider].Auth == "api_key"
+// Native histories may record an upstream ID instead of a gateway alias.
+// Resolve only an unambiguous route belonging to that provider; unlike an
+// explicit -m, the current default must not move an old session to another
+// supplier. Unknown/removed models stay native instead of using our default.
+func wrappedSessionModel(session wrappedSession, cfg *Config) string {
+	if _, ok := cfg.Models[session.Model]; ok {
+		return session.Model
 	}
-	return session.ModelProvider == "codex-gateway"
+	alias := ""
+	for name, route := range cfg.Models {
+		if session.Model == "" || route.Model != session.Model {
+			continue
+		}
+		if session.ModelProvider != "codex-gateway" && session.ModelProvider != route.Provider &&
+			!(session.ModelProvider == "openai" && cfg.Providers[route.Provider].Auth == "codex") {
+			continue
+		}
+		if alias != "" {
+			return "" // Ambiguous history: leave native resolution intact.
+		}
+		alias = name
+	}
+	return alias
 }
