@@ -61,7 +61,7 @@ codex-gateway run -- resume
 codex-gateway stop
 ```
 
-旧入口中，无参数的 `codex-gateway` 等同于 `codex-gateway run`；安装后的日常入口是 `codex`。`start` 启动或复用这个配置目录对应的后台网关；`run` 先确保网关运行，再调用安装时保留的原启动器，未记录原启动器时从 `PATH` 查找 Codex。已有的 Codex launcher 和备份入口仍通过这条调用链运行，也可以用 `run --codex-bin /absolute/path/to/codex` 选择本次客户端的可执行文件。Codex 参数放在 `run --` 后，例如 `run -- resume <session-id>`。
+旧入口中，无参数的 `codex-gateway` 等同于 `codex-gateway run`；安装后的日常入口是 `codex`。`start` 启动或复用这个配置目录对应的后台网关；`run` 需要已有网关配置，在真正启动会话时确保网关运行，再调用安装时保留的原启动器，未记录原启动器时从 `PATH` 查找 Codex。已有的 Codex launcher 和备份入口仍通过这条调用链运行，也可以用 `run --codex-bin /absolute/path/to/codex` 选择本次客户端的可执行文件。Codex 参数放在 `run --` 后，例如 `run -- resume <session-id>`。
 
 首次调用原生客户端时，如果所选 Codex home 尚不存在，会创建该目录；已有目录的权限、配置和登录文件保持原样。官方登录或凭据刷新产生的认证更新由原生 Codex 负责。
 
@@ -96,6 +96,18 @@ Running without the shared background server: command-line configuration overrid
 
 
 ## 跨供应商会话兼容
+
+混合配置下，包装入口把已注册的官方与第三方模型放在同一个 `model_provider` 和模型目录中，由网关按模型别名选择上游。`/model` 只切换模型，不切换客户端连接；这也适用于通过 `-m` 选择官方模型和恢复已注册官方模型的会话。仅官方配置继续原生直连；未知模型保留原生处理，不会被强制发送给第三方。
+
+每个供应商独立配置代理。如果第三方可用而官方模型未出现在菜单，检查官方登录和官方供应商的网络设置；例如需要代理时执行 `codex-gateway add-provider official --official --proxy http://127.0.0.1:7890 --replace`（替换为自己的供应商名称及代理地址），再重开 Codex。命令复用原生登录并尝试同步模型，不要仅为了显示菜单手工声明账号不可用的官方模型。
+
+### 原生历史列表
+
+`codex resume` / `codex fork` 的列表增强独立于模型路由配置：未配置网关、仅官方配置或显式选择未知模型时也生效。只读取当前 `CODEX_HOME`（已有网关配置时使用其 `codex_home`），不会自动合并其他目录。通过私有 Unix socket 使用原生选择器，只把 `thread/list` 的 `modelProviders` 改为空数组；保留原生 Cwd / All 切换，默认 Cwd，传入 `--all` 才默认 All。`resume` 额外包含非交互会话；搜索、分页、预览和归档筛选仍由原生界面处理。
+
+列表后端使用临时、无需上游认证的本地历史读取配置，不同步模型、不连接供应商、不启动网关转发服务，也不写入用户 provider 配置。选中后关闭临时连接，再把会话 ID 和原始参数交回正常启动路径，此时才解析模型和准备所需路由。真正的会话不走 remote 模式，避免改变目录确认和权限参数。退出或取消时回收临时进程与 socket，不迁移历史、不重写 provider 元数据。显式会话 ID/名称和 `--last` 不经过选择器。此路径已在 Codex 0.160.1 验证，依赖其 app-server 协议，原生版本升级时需要回归检查。
+
+可见性不依赖旧 provider 是否已注册，但继续对话仍需原生配置或网关路由及有效凭据。`codex-gateway run -- resume` 是显式网关模式，仍需要网关配置；只想浏览已有历史时直接使用包装入口 `codex resume`。
 
 不同供应商可能无法读取彼此生成的加密 reasoning。默认保留原始请求并返回上游错误，不猜测未知失败原因。
 
