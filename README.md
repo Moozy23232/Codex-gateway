@@ -74,6 +74,23 @@ codex
 
 进入 Codex 后用 `/model` 切换已配置模型，部分版本需展开 **All models**。混合配置下，已注册的官方和第三方模型统一经过网关，无需退出重开来切换供应商；官方权限和额度仍以账号为准。
 
+## 选择模型与设置默认值
+
+配置过网关后，可以查看模型、临时选择模型，或修改后续新会话的默认值：
+
+```bash
+codex-gateway model list                     # 查看已注册的模型别名
+codex-gateway config show                    # 查看配置中的 default_model
+codex -m example/coding                      # 仅本次启动指定模型
+codex-gateway config set default_model example/coding
+```
+
+`example/coding` 只是示例，请替换为 `model list` 输出中的模型别名（JSON 的键），不是供应商名称或未注册的上游模型 ID。
+
+- **当前会话**：用 `/model` 切换；修改网关默认值不会切换已经打开的会话。
+- **后续新会话**：`config set default_model` 设置的值在下次启动时生效；显式 `-m` 优先。网关通过启动参数覆盖原生默认，不改写 `~/.codex/config.toml` 中的 `model`；恢复旧会话时可能沿用历史模型。
+- **初始默认值**：只安装、未配置网关模型时沿用原生配置。尚无网关默认值时，首次 `add-model` 会把添加的模型设为默认；先执行 `add-provider --official` 并同步成功，则采用官方模型列表标记的默认项，不保证等于原生配置中的选择。已有默认值时，后续添加模型会保留它，除非指定 `--default`；原默认模型被移除时可能重新选择。
+
 ## 恢复会话
 
 ```bash
