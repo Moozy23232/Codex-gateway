@@ -36,6 +36,20 @@ command -v codex
 | `--install-dir "$HOME/apps/codex/bin"` | 自定义安装目录，也支持 `CODEX_GATEWAY_INSTALL_DIR` |
 | `--version v0.3.0` | 锁定或回退到指定版本，也支持 `CODEX_GATEWAY_VERSION`；日常安装无需设置 |
 
+### 原生 Codex 安装在自定义目录
+
+不要求原生 Codex 安装在固定位置。网关优先使用安装时保存的原入口，否则从 `PATH` 中查找名为 `codex` 的原客户端，并跳过网关自身；**不会全盘扫描**。没有可用安装记录时，自定义目录中的 `codex` 只要在 `PATH` 中就能被发现。
+
+若不在 `PATH` 中，或想明确选择某个安装版本，可指定原生入口：
+
+```bash
+export CODEX_GATEWAY_CODEX_BIN="/opt/codex/bin/codex"
+```
+
+替换为实际路径，需要长期生效时写入 shell 配置。该变量优先于安装记录和 `PATH`，不能指回网关包装入口（例如默认安装后的 `~/.local/bin/codex`）。仍需让**网关目录排在 `PATH` 前面**，否则直接输入 `codex` 会绕过网关。
+
+若原入口是自制启动脚本，内部历史查询、模型发现和账号刷新可能无法自动定位真实二进制，可另用 `CODEX_GATEWAY_NATIVE_CODEX_BIN` 指定其绝对路径。修改环境变量后重新启动 Codex；已运行的后台网关需先用 `codex-gateway stop` 停止空闲服务，再启动会话。更多入口选项见[高级配置](docs/advanced.md#启动恢复与停止)。
+
 ## 开始使用
 
 下面三种方式按需选择，官方订阅与第三方 API 也可以混合使用。
